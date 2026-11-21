@@ -5,5 +5,5 @@
 // ============================================================
 window.BITBUY_CONFIG = {
   SUPABASE_URL: "https://icyddvzfsuqpcapvifmq.supabase.co",
-  SUPABASE_ANON_KEY: "jfBI1EpYIxUV1kuU"
+  SUPABASE_ANON_KEY: "sb_publishable_Wi3hvagwiD-Drq_CNQHQZw_zwBqwM_N"
 };
