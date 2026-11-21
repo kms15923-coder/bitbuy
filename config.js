@@ -5,5 +5,5 @@
 // ============================================================
 window.BITBUY_CONFIG = {
   SUPABASE_URL: "https://여기에-프로젝트주소.supabase.co",
-  SUPABASE_ANON_KEY: "여기에-anon-public-키"
+  SUPABASE_ANON_KEY: "jfBI1EpYIxUV1kuU"
 };
