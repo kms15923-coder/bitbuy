@@ -1,0 +1,8 @@
+{
+  "name": "bitbuy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "비트바이 — 비트코인 실시간 시세·뉴스·커뮤니티",
+  "engines": { "node": ">=18" }
+}
