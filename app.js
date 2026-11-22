@@ -156,17 +156,28 @@
     vPre.gain.value = (S.vvol / 100) * 12; // 이전보다 약 3배 크게
     return vPre;
   }
+  // 서버 음성: { buf, engine } — engine: "edge"(선희 여성) 또는 "google"
   async function ttsBuffer(text) {
     if (ttsCache.has(text)) return ttsCache.get(text);
     const p = (async () => {
       const r = await fetch("/api/tts?text=" + encodeURIComponent(text));
       if (!r.ok) throw new Error("tts " + r.status);
+      const engine = r.headers.get("x-tts-engine") || "google";
       const ab = await r.arrayBuffer();
-      return await new Promise((ok, no) => audio.decodeAudioData(ab, ok, no));
+      const buf = await new Promise((ok, no) => audio.decodeAudioData(ab, ok, no));
+      return { buf, engine };
     })();
     ttsCache.set(text, p);
     p.catch(() => ttsCache.delete(text));
     return p;
+  }
+  const ENGINE_NAME = { edge: "선희 여성 음성 (증폭)", google: "구글 음성 (증폭)" };
+  function playServer(res, out) {
+    try { vSrc && vSrc.stop(); } catch (_) {}
+    vSrc = audio.createBufferSource(); vSrc.buffer = res.buf;
+    vSrc.playbackRate.value = res.engine === "edge" ? 1.0 : 1.1;
+    vSrc.connect(out); vSrc.start();
+    lastVoiceInfo = ENGINE_NAME[res.engine] || res.engine;
   }
   // 기기 내장 한국어 음성 중 여성 음성을 우선으로
   const FEMALE = /(SunHi|Sun-Hi|Heami|Yuna|Sora|Jiyoung|JiMin|Seoyeon|Google 한국|female|여성|여자)/i;
@@ -196,22 +207,15 @@
     if (!S.voice) return;
     if (S.voiceName && S.voiceName !== "google") { speakDevice(text, S.voiceName); showVoiceInfo(); return; }
     const out = voiceOut();
-    if (!out) { speakDevice(text); showVoiceInfo(); return; }
-    try {
-      const buf = await ttsBuffer(text);
-      try { vSrc && vSrc.stop(); } catch (_) {}
-      vSrc = audio.createBufferSource(); vSrc.buffer = buf;
-      vSrc.playbackRate.value = 1.1; // 살짝 높고 빠르게 → 더 젊은 목소리
-      vSrc.connect(out); vSrc.start();
-      lastVoiceInfo = "구글 여성 음성 (증폭)";
-    } catch (_) {
-      try { // 한 번 더 시도
-        ttsCache.delete(text);
-        const buf = await ttsBuffer(text);
-        vSrc = audio.createBufferSource(); vSrc.buffer = buf; vSrc.playbackRate.value = 1.1; vSrc.connect(out); vSrc.start();
-        lastVoiceInfo = "구글 여성 음성 (증폭)";
-      } catch (_) { speakDevice(text); lastVoiceInfo += " — 구글 음성 연결 실패로 대신 재생"; }
+    if (out) {
+      for (let i = 0; i < 2; i++) { // 서버 음성 2번까지 시도
+        try { playServer(await ttsBuffer(text), out); showVoiceInfo(); return; }
+        catch (_) { ttsCache.delete(text); }
+      }
     }
+    // 서버 음성이 안 되면: 기기의 여성 음성 → 없으면 목소리를 높여서 읽기
+    speakDevice(text);
+    lastVoiceInfo += " — 서버 음성 연결 실패로 대신 재생";
     showVoiceInfo();
   }
   function showVoiceInfo() { const e = document.querySelector("#voiceInfo"); if (e) e.textContent = lastVoiceInfo ? "재생: " + lastVoiceInfo : ""; }
@@ -305,7 +309,7 @@
   const voiceSel = $("#voiceSel");
   function fillVoices() {
     voiceSel.textContent = "";
-    const g = el("option", null, "구글 여성 음성 (크게, 추천)"); g.value = "google"; voiceSel.append(g);
+    const g = el("option", null, "선희 여성 음성 (크게, 추천)"); g.value = "google"; voiceSel.append(g);
     koVoices().forEach((v) => { const o = el("option", null, "기기 음성: " + v.name + (MALE.test(v.name) ? " (남성)" : FEMALE.test(v.name) ? " (여성)" : "")); o.value = v.name; voiceSel.append(o); });
     voiceSel.value = [...voiceSel.options].some((o) => o.value === S.voiceName) ? S.voiceName : "google";
   }

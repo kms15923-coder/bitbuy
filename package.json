@@ -4,5 +4,8 @@
   "private": true,
   "type": "module",
   "description": "비트바이 — 비트코인 실시간 시세·뉴스·커뮤니티",
-  "engines": { "node": ">=18" }
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }
