@@ -104,16 +104,54 @@
     }
     return Math.round((at - audio.currentTime) * 1000);
   }
-  function speak(text) {
-    if (!S.voice || !("speechSynthesis" in window)) return;
+  // 멘트: 서버(/api/tts)에서 한국어 음성 파일을 받아 알림음처럼 크게 증폭해서 재생
+  //       실패하면 기기에 내장된 음성(speechSynthesis)으로 대신 읽음
+  const ttsCache = new Map();
+  let vgain = null, vSrc = null;
+  function voiceOut() {
+    if (!ensureAudio()) return null;
+    if (!vgain) {
+      const comp = audio.createDynamicsCompressor();
+      comp.threshold.value = -20; comp.knee.value = 6; comp.ratio.value = 10;
+      comp.attack.value = 0.003; comp.release.value = 0.15;
+      vgain = audio.createGain();
+      vgain.connect(comp).connect(audio.destination);
+    }
+    vgain.gain.value = (S.vvol / 100) * 4; // 최대 4배 증폭
+    return vgain;
+  }
+  async function ttsBuffer(text) {
+    if (ttsCache.has(text)) return ttsCache.get(text);
+    const p = (async () => {
+      const r = await fetch("/api/tts?text=" + encodeURIComponent(text));
+      if (!r.ok) throw new Error("tts " + r.status);
+      const ab = await r.arrayBuffer();
+      return await new Promise((ok, no) => audio.decodeAudioData(ab, ok, no));
+    })();
+    ttsCache.set(text, p);
+    p.catch(() => ttsCache.delete(text));
+    return p;
+  }
+  function speakFallback(text) {
+    if (!("speechSynthesis" in window)) return;
     try {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = "ko-KR"; u.volume = S.vvol / 100; u.rate = 1.0;
+      u.lang = "ko-KR"; u.volume = Math.min(1, S.vvol / 100); u.rate = 1.0;
       const ko = speechSynthesis.getVoices().find((v) => /ko/i.test(v.lang));
       if (ko) u.voice = ko;
       speechSynthesis.speak(u);
     } catch (_) {}
+  }
+  async function speak(text) {
+    if (!S.voice) return;
+    const out = voiceOut();
+    if (!out) { speakFallback(text); return; }
+    try {
+      const buf = await ttsBuffer(text);
+      try { vSrc && vSrc.stop(); } catch (_) {}
+      vSrc = audio.createBufferSource(); vSrc.buffer = buf; vSrc.connect(out); vSrc.start();
+    } catch (_) { speakFallback(text); }
   }
   // 소리 → (다 울린 뒤) 멘트
   let speakTimer = null;
@@ -193,8 +231,8 @@
   vvolEl.value = S.vvol; vvolNum.textContent = S.vvol;
   volEl.oninput = () => { S.vol = Number(volEl.value); volNum.textContent = S.vol; if (master) master.gain.value = (S.vol / 100) * 3; saveS(); };
   volEl.onchange = () => { ensureAudio(); beep(950, audio.currentTime + 0.02, 0.15); }; // 손을 떼면 미리 듣기
-  vvolEl.oninput = () => { S.vvol = Number(vvolEl.value); vvolNum.textContent = S.vvol; saveS(); };
-  vvolEl.onchange = () => speak("음성 안내 크기");
+  vvolEl.oninput = () => { S.vvol = Number(vvolEl.value); vvolNum.textContent = S.vvol; if (vgain) vgain.gain.value = (S.vvol / 100) * 4; saveS(); };
+  vvolEl.onchange = () => speak("비트코인 1퍼센트 급등");
   const soundBtn = $("#soundBtn");
   const syncSound = () => { soundBtn.classList.toggle("on", S.soundOn); soundBtn.textContent = S.soundOn ? "🔔 소리 켜짐" : "🔇 소리 꺼짐"; };
   soundBtn.onclick = () => {
@@ -254,55 +292,103 @@
   }
 
   // =====================================================
-  //  코인 차트 (업비트)
+  //  코인 차트 (바이비트 USDT 무기한 / 업비트 원화)
   // =====================================================
-  const C = Object.assign({ coin: "BTC", unit: "1" }, store.get("bitbuy.coinView", {}));
+  const EXS = [["bybit", "바이비트"], ["upbit", "업비트"]];
+  const C = Object.assign({ ex: "bybit", coin: "BTC", unit: "1" }, store.get("bitbuy.coinView", {}));
   if (!COIN_NAME[C.coin]) C.coin = "BTC";
   if (!IV_SEC[C.unit]) C.unit = "1";
+  if (!EXS.some(([v]) => v === C.ex)) C.ex = "bybit";
+  const saveC = () => store.set("bitbuy.coinView", C);
   const cBox = $("#cChart");
   const cCh = makeChart(cBox);
-  let cLast = null, cSeq = 0;
+  let cLast = null, cSeq = 0, dayOpen = null;
+  const isBybit = () => C.ex === "bybit";
 
   function renderCoinButtons() {
     const box = $("#coinBtns"); box.textContent = "";
-    COINS.forEach(([sym, nm]) => {
-      const b = el("button", sym === C.coin ? "on" : "", nm);
-      b.onclick = () => { C.coin = sym; store.set("bitbuy.coinView", C); renderCoinButtons(); loadCoin(); renderCoinHead(); };
+    EXS.forEach(([v, nm]) => {
+      const b = el("button", "ex" + (v === C.ex ? " on" : ""), nm);
+      b.onclick = () => { if (C.ex === v) return; C.ex = v; saveC(); renderCoinButtons(); renderCoinHead(); loadCoin(); };
       box.append(b);
     });
-    ivButtons($("#cIvs"), C.unit, (v) => { C.unit = v; store.set("bitbuy.coinView", C); renderCoinButtons(); loadCoin(); });
+    box.append(el("span", "sep"));
+    COINS.forEach(([sym, nm]) => {
+      const b = el("button", sym === C.coin ? "on" : "", nm);
+      b.onclick = () => { C.coin = sym; saveC(); renderCoinButtons(); renderCoinHead(); loadCoin(); };
+      box.append(b);
+    });
+    ivButtons($("#cIvs"), C.unit, (v) => { C.unit = v; saveC(); renderCoinButtons(); loadCoin(); });
   }
+
+  // 바이비트 봉 데이터: 내 브라우저에서 바로 받고, 막히면 서버(서울)를 거쳐서 받음
+  const BYBIT_IV = { "1": "1", "15": "15", "60": "60", "240": "240", "D": "D" };
+  async function bybitKline(sym, unit, limit) {
+    const qs = `category=linear&symbol=${sym}USDT&interval=${BYBIT_IV[unit]}&limit=${limit}`;
+    const parse = (j) => {
+      const list = j && j.result && j.result.list;
+      if (!Array.isArray(list) || !list.length) throw new Error("empty");
+      return list.map((r) => ({ time: Math.floor(Number(r[0]) / 1000), open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] }))
+        .sort((a, b) => a.time - b.time);
+    };
+    try {
+      const r = await fetch("https://api.bybit.com/v5/market/kline?" + qs);
+      if (!r.ok) throw 0;
+      return parse(await r.json());
+    } catch (_) {
+      const r = await fetch("/api/bybit?" + qs);
+      if (!r.ok) throw new Error("proxy");
+      return parse(await r.json());
+    }
+  }
+  async function upbitKline(sym, unit) {
+    const r = await fetch(`/api/candles?market=KRW-${sym}&unit=${unit}`);
+    const j = await r.json();
+    if (!j.candles || !j.candles.length) throw new Error("empty");
+    return j.candles;
+  }
+  // 바이비트 "전일 대비" 기준 = 오늘 일봉 시가(한국시간 09:00)
+  async function loadDayOpen() {
+    if (!isBybit()) return;
+    try { const d = await bybitKline(C.coin, "D", 1); dayOpen = { sym: C.coin, open: d[d.length - 1].open, t: d[d.length - 1].time }; } catch (_) {}
+  }
+  setInterval(loadDayOpen, 10 * 60 * 1000);
 
   async function loadCoin() {
     if (!cCh) return;
     const seq = ++cSeq;
+    cLast = null; dayOpen = null;
     overlay(cBox, "차트 불러오는 중…");
+    bybitSubKline();
     try {
-      const r = await fetch(`/api/candles?market=KRW-${C.coin}&unit=${C.unit}`);
-      const j = await r.json();
+      const raw = isBybit() ? await bybitKline(C.coin, C.unit, 200) : await upbitKline(C.coin, C.unit);
       if (seq !== cSeq) return;
-      if (!j.candles || !j.candles.length) throw 0;
-      const bars = toKst(j.candles);
-      setPrecision(cCh.candle, bars[bars.length - 1].close, false);
+      const bars = toKst(raw);
+      setPrecision(cCh.candle, bars[bars.length - 1].close, isBybit());
       cCh.candle.setData(bars);
       cCh.vol.setData(bars.map(volBar));
       cCh.chart.timeScale().fitContent();
       cLast = { ...bars[bars.length - 1] };
       overlay(cBox, null);
-      $("#cStatus").textContent = `업비트 KRW-${C.coin} · ${IV_NAME[C.unit]}봉 · 실시간`;
+      $("#cStatus").textContent = isBybit()
+        ? `바이비트 ${C.coin}USDT 무기한 · ${IV_NAME[C.unit]}봉 · 실시간`
+        : `업비트 KRW-${C.coin} · ${IV_NAME[C.unit]}봉 · 실시간`;
+      loadDayOpen();
     } catch (_) {
-      if (seq === cSeq) overlay(cBox, "차트를 불러오지 못했어요. 잠시 후 다시 시도합니다.");
+      if (seq === cSeq) overlay(cBox, isBybit()
+        ? "바이비트 차트를 불러오지 못했어요.\n잠시 후 다시 시도하거나 '업비트'를 눌러 보세요."
+        : "차트를 불러오지 못했어요. 잠시 후 다시 시도합니다.");
     }
   }
-  // 서버에서 최신 봉을 주기적으로 다시 받아 거래량 등을 보정
+
+  // 업비트: 서버에서 최신 봉을 주기적으로 다시 받아 거래량 등을 보정 (바이비트는 실시간 봉이 옴)
   async function refreshCoin() {
-    if (!cCh || !cLast) return;
+    if (!cCh || !cLast || isBybit()) return;
     const seq = cSeq;
     try {
-      const r = await fetch(`/api/candles?market=KRW-${C.coin}&unit=${C.unit}`);
-      const j = await r.json();
-      if (seq !== cSeq || !j.candles || !j.candles.length) return;
-      toKst(j.candles).slice(-3).forEach((b) => {
+      const raw = await upbitKline(C.coin, C.unit);
+      if (seq !== cSeq || isBybit()) return;
+      toKst(raw).slice(-3).forEach((b) => {
         if (b.time >= cLast.time) {
           if (b.time === cLast.time && mk[C.coin].krw) { b.close = mk[C.coin].krw; b.high = Math.max(b.high, b.close); b.low = Math.min(b.low, b.close); }
           cCh.candle.update(b); cCh.vol.update(volBar(b)); cLast = { ...b };
@@ -312,14 +398,31 @@
   }
   setInterval(refreshCoin, 20000);
 
-  // 실시간 체결가로 마지막 봉 움직이기
-  function liveCoin(price) {
-    if (!cCh || !cLast) return;
+  // 업비트 체결가로 마지막 봉 움직이기
+  function liveUpbitBar(price) {
+    if (!cCh || !cLast || isBybit()) return;
     const step = IV_SEC[C.unit];
     const bucket = Math.floor(Date.now() / 1000 / step) * step + KST;
     if (bucket > cLast.time) cLast = { time: bucket, open: price, high: price, low: price, close: price, volume: 0 };
     else { cLast.close = price; cLast.high = Math.max(cLast.high, price); cLast.low = Math.min(cLast.low, price); }
     cCh.candle.update({ time: cLast.time, open: cLast.open, high: cLast.high, low: cLast.low, close: cLast.close });
+  }
+  // 바이비트 실시간 봉
+  function liveBybitBar(k) {
+    if (!cCh || !cLast || !isBybit()) return;
+    const b = { time: Math.floor(Number(k.start) / 1000) + KST, open: +k.open, high: +k.high, low: +k.low, close: +k.close, volume: +k.volume };
+    if (b.time < cLast.time) return;
+    cCh.candle.update(b); cCh.vol.update(volBar(b)); cLast = b;
+  }
+
+  // 선택한 코인 알림 검사
+  function coinAlert(price) {
+    const nm = COIN_NAME[C.coin];
+    const priceText = isBybit() ? "$" + usd(price) : "₩" + krw(price);
+    if (S.ref === "day") {
+      if (isBybit()) { if (dayOpen && dayOpen.sym === C.coin) checkAlert("coin", nm, price, dayOpen.open, "day" + dayOpen.t, priceText, "오늘 09시 시가"); }
+      else { const m = mk[C.coin]; if (m.rate != null) { const base = price / (1 + m.rate); checkAlert("coin", nm, price, base, "day" + Math.round(base * 1e4), priceText, "전일 종가"); } }
+    } else if (cLast) checkAlert("coin", nm, price, cLast.open, `${C.ex}${C.unit}@${cLast.time}`, priceText, `${IV_NAME[C.unit]}봉 시가`);
   }
 
   // =====================================================
@@ -416,20 +519,27 @@
   }
 
   // =====================================================
-  //  실시간 시세 연결 (업비트 + 바이낸스 WebSocket)
+  //  실시간 시세 연결 (업비트 원화 + 바이비트 USDT WebSocket)
   // =====================================================
   const mk = {};
-  COINS.forEach(([s]) => { mk[s] = { krw: null, rate: null, usd: null }; });
+  COINS.forEach(([s]) => { mk[s] = { krw: null, rate: null, usd: null, urate: null }; });
   let usdtKrw = null;
   const kimchi = (s) => { const m = mk[s]; return m && m.krw && m.usd && usdtKrw ? m.krw / (m.usd * usdtKrw) - 1 : null; };
 
   function renderCoinHead() {
-    const m = mk[C.coin], nm = COIN_NAME[C.coin];
-    $("#cName").textContent = `${nm} · ${C.coin}/KRW · 업비트`;
-    const pe = $("#cPrice"); pe.textContent = m.krw == null ? "—" : "₩" + krw(m.krw); pe.className = "big mono " + cls(m.rate);
-    const ce = $("#cChg"); ce.textContent = m.rate == null ? "—" : pct(m.rate) + " 전일대비"; ce.className = "mono chg " + cls(m.rate);
-    const k = kimchi(C.coin);
-    $("#cSub").textContent = `바이낸스 ${m.usd == null ? "—" : "$" + usd(m.usd)} · 김프 ${k == null ? "—" : pct(k)}`;
+    const m = mk[C.coin], nm = COIN_NAME[C.coin], k = kimchi(C.coin);
+    const pe = $("#cPrice"), ce = $("#cChg");
+    if (isBybit()) {
+      $("#cName").textContent = `${nm} · ${C.coin}USDT 무기한 · 바이비트`;
+      pe.textContent = m.usd == null ? "—" : "$" + usd(m.usd); pe.className = "big mono " + cls(m.urate);
+      ce.textContent = m.urate == null ? "—" : pct(m.urate) + " 24시간"; ce.className = "mono chg " + cls(m.urate);
+      $("#cSub").textContent = `업비트 ${m.krw == null ? "—" : "₩" + krw(m.krw)} · 김프 ${k == null ? "—" : pct(k)}`;
+    } else {
+      $("#cName").textContent = `${nm} · ${C.coin}/KRW · 업비트`;
+      pe.textContent = m.krw == null ? "—" : "₩" + krw(m.krw); pe.className = "big mono " + cls(m.rate);
+      ce.textContent = m.rate == null ? "—" : pct(m.rate) + " 전일대비"; ce.className = "mono chg " + cls(m.rate);
+      $("#cSub").textContent = `바이비트 ${m.usd == null ? "—" : "$" + usd(m.usd)} · 김프 ${k == null ? "—" : pct(k)}`;
+    }
   }
 
   let tq = false;
@@ -440,6 +550,7 @@
       const m = mk[s]; if (m.krw == null) return;
       const sp = el("span", null, s); sp.append(el("strong", "mono " + cls(m.rate), "₩" + krw(m.krw) + " " + pct(m.rate))); tk.append(sp);
     });
+    if (mk.BTC.usd != null) { const sp = el("span", null, "BTC 바이비트"); sp.append(el("strong", "mono " + cls(mk.BTC.urate), "$" + usd(mk.BTC.usd))); tk.append(sp); }
     const k = kimchi("BTC");
     if (k != null) { const sp = el("span", null, "김프"); sp.append(el("strong", "mono " + cls(k), pct(k))); tk.append(sp); }
     if (usdtKrw) { const sp = el("span", null, "USDT"); sp.append(el("strong", "mono", "₩" + krw(usdtKrw))); tk.append(sp); }
@@ -450,9 +561,10 @@
     if (!tk.children.length) tk.append(el("span", null, "시세 연결 중…"));
   }
 
-  const live = { upbit: false, binance: false };
+  const live = { upbit: false, bybit: false };
   function renderLiveState() {
-    $("#liveState").textContent = live.upbit ? "● 실시간" : "재연결 중…";
+    const ok = isBybit() ? live.bybit : live.upbit;
+    $("#liveState").textContent = ok ? "● 실시간" : "재연결 중…";
   }
   function connectWS(name, url, onOpen, onMessage) {
     let delay = 1000;
@@ -462,12 +574,13 @@
       ws.binaryType = "blob";
       ws.onopen = () => { delay = 1000; live[name] = true; renderLiveState(); onOpen && onOpen(ws); };
       ws.onmessage = onMessage;
-      ws.onclose = () => { live[name] = false; renderLiveState(); setTimeout(go, delay); delay = Math.min(delay * 2, 30000); };
+      ws.onclose = () => { live[name] = false; renderLiveState(); if (onOpen && onOpen.closed) onOpen.closed(ws); setTimeout(go, delay); delay = Math.min(delay * 2, 30000); };
       ws.onerror = () => { try { ws.close(); } catch (_) {} };
     };
     go();
   }
 
+  // ---- 업비트 (원화 가격, 김프 계산용) ----
   connectWS("upbit", "wss://api.upbit.com/websocket/v1",
     (ws) => ws.send(JSON.stringify([
       { ticket: "bitbuy-" + Math.random().toString(36).slice(2) },
@@ -486,24 +599,52 @@
         queueTicker();
         if (sym === C.coin) {
           renderCoinHead();
-          liveCoin(price);
-          const nm = COIN_NAME[sym], priceText = "₩" + krw(price);
-          if (S.ref === "day") { const base = price / (1 + rate); checkAlert("coin", nm, price, base, "day" + Math.round(base * 1e4), priceText, "전일 종가"); }
-          else if (cLast) checkAlert("coin", nm, price, cLast.open, `${C.unit}@${cLast.time}`, priceText, `${IV_NAME[C.unit]}봉 시가`);
+          if (!isBybit()) { liveUpbitBar(price); coinAlert(price); }
         }
       } catch (_) {}
     });
 
-  connectWS("binance",
-    "wss://stream.binance.com:9443/stream?streams=" + COINS.map(([s]) => s.toLowerCase() + "usdt@miniTicker").join("/"),
-    null,
-    (ev) => {
-      try {
-        const d = JSON.parse(ev.data).data;
-        const sym = d.s.replace(/USDT$/, "");
-        if (mk[sym]) { mk[sym].usd = parseFloat(d.c); if (sym === C.coin) renderCoinHead(); queueTicker(); }
-      } catch (_) {}
-    });
+  // ---- 바이비트 (USDT 무기한: 시세 + 실시간 봉) ----
+  let bybitWs = null, bybitKlineTopic = null, bybitPing = null;
+  function bybitSubKline() {
+    const want = isBybit() ? `kline.${BYBIT_IV[C.unit]}.${C.coin}USDT` : null;
+    if (want === bybitKlineTopic) return;
+    if (bybitWs && bybitWs.readyState === 1) {
+      if (bybitKlineTopic) bybitWs.send(JSON.stringify({ op: "unsubscribe", args: [bybitKlineTopic] }));
+      if (want) bybitWs.send(JSON.stringify({ op: "subscribe", args: [want] }));
+      bybitKlineTopic = want;
+    }
+  }
+  const bybitOpen = (ws) => {
+    bybitWs = ws; bybitKlineTopic = null;
+    ws.send(JSON.stringify({ op: "subscribe", args: COINS.map(([s]) => `tickers.${s}USDT`) }));
+    bybitSubKline();
+    clearInterval(bybitPing);
+    bybitPing = setInterval(() => { try { ws.send(JSON.stringify({ op: "ping" })); } catch (_) {} }, 20000);
+  };
+  bybitOpen.closed = () => { bybitWs = null; bybitKlineTopic = null; clearInterval(bybitPing); };
+  connectWS("bybit", "wss://stream.bybit.com/v5/public/linear", bybitOpen, (ev) => {
+    try {
+      const m = JSON.parse(ev.data);
+      if (!m.topic) return;
+      if (m.topic.startsWith("tickers.")) {
+        const sym = m.topic.slice(8).replace(/USDT$/, "");
+        const d = m.data || {};
+        if (!mk[sym]) return;
+        if (d.lastPrice != null) mk[sym].usd = +d.lastPrice;
+        if (d.price24hPcnt != null) mk[sym].urate = +d.price24hPcnt;
+        queueTicker();
+        if (sym === C.coin) {
+          renderCoinHead();
+          if (isBybit() && d.lastPrice != null) coinAlert(+d.lastPrice);
+        }
+      } else if (m.topic === bybitKlineTopic && Array.isArray(m.data)) {
+        m.data.forEach(liveBybitBar);
+        const last = m.data[m.data.length - 1];
+        if (last && isBybit()) { mk[C.coin].usd = +last.close; renderCoinHead(); coinAlert(+last.close); }
+      }
+    } catch (_) {}
+  });
 
   renderCoinButtons(); renderCoinHead(); loadCoin();
   renderStockButtons(); loadStock();

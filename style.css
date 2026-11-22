@@ -51,6 +51,9 @@ header nav a:hover{background:var(--panel2);color:var(--text);text-decoration:no
 .ivs button{border-radius:6px;padding:4px 10px}
 .ivs button.on{background:#2a1d0c;border-color:var(--btc);color:var(--btc);font-weight:700}
 .pick form{display:flex;gap:4px}
+.pick .ex{border-radius:6px;font-weight:700}
+.pick .ex.on{background:#f7a600;border-color:#f7a600;color:#111}
+.pick .sep{width:1px;background:var(--line);margin:2px 4px}
 .pick input{width:92px;padding:4px 9px;font-size:12px;border-radius:999px;text-transform:uppercase}
 .chart{flex:1;min-height:0;position:relative}
 .chart .msg-over{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);font-size:13px;text-align:center;padding:20px;z-index:3;pointer-events:none}
