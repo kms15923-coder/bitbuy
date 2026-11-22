@@ -67,9 +67,14 @@
     <div class="ph"><h2>실시간 채팅 <small class="online-chip" id="chatOnline"></small></h2><small id="chatState">연결 중…</small></div>
     <div class="nick">
       <span>닉네임</span>
-      <input id="nickInput" maxlength="12" placeholder="닉네임을 정해 주세요">
+      <input id="nickInput" maxlength="8" placeholder="닉네임 (2~8자)">
+      <b class="mono tag" id="nickTag" title="이 브라우저 고유 코드 — 같은 닉네임 사칭 방지"></b>
     </div>
-    <div class="msgs" id="msgs"><div class="status">채팅 불러오는 중…</div></div>
+    <div class="msgs-wrap">
+      <div class="msgs" id="msgs"><div class="status">채팅 불러오는 중…</div></div>
+      <button class="new-msg" id="newMsgBtn" type="button" hidden>↓ 새 메시지</button>
+    </div>
+    <div class="reacts" id="reacts"></div>
     <form id="chatForm">
       <input id="chatInput" maxlength="300" placeholder="메시지를 입력하세요" autocomplete="off">
       <button class="btn" id="chatSend">전송</button>

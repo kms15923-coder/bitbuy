@@ -139,6 +139,31 @@ function movers(m) {
 }
 const DISCLAIMER = "\n\n※ 비트바이봇이 자동으로 작성한 글입니다. 투자 권유가 아니며, 시세는 작성 시점 기준입니다.";
 
+// ---------- 채팅 급등락 알림 (1분마다 실행) ----------
+// 1분 / 5분 사이에 아래 % 이상 움직이면 채팅창에 시스템 메시지
+const CHAT_TH = { BTC: 0.8, ETH: 1.2 }; const CHAT_TH_DEFAULT = 2.0; // 1분 기준(%), 5분은 2배
+async function chatSurge(chatPost) {
+  const t = kstParts();
+  const bucket = `${t.y}${t.mo}${t.d}${t.hh}${String(Math.floor(t.mi / 10))}`; // 같은 코인·방향은 10분에 1번만
+  const results = await Promise.all(COINS.map(async ([sym, nm]) => {
+    try {
+      const c = await getJSON(`https://api.upbit.com/v1/candles/minutes/1?market=KRW-${sym}&count=6`);
+      if (!Array.isArray(c) || c.length < 6) return null;
+      const now = c[0].trade_price;
+      const m1 = now / c[1].trade_price - 1, m5 = now / c[5].trade_price - 1;
+      const th = (CHAT_TH[sym] || CHAT_TH_DEFAULT) / 100;
+      let hit = null;
+      if (Math.abs(m1) >= th) hit = { win: "1분", ch: m1 };
+      else if (Math.abs(m5) >= th * 2) hit = { win: "5분", ch: m5 };
+      if (!hit) return null;
+      const up = hit.ch > 0;
+      const body = `⚡ ${nm} ${hit.win} 만에 ${sign(hit.ch)} ${up ? "급등" : "급락"}! ₩${won(now)}`;
+      return chatPost(`cs-${sym}-${up ? "u" : "d"}-${bucket}`, body);
+    } catch (_) { return null; }
+  }));
+  return results.filter(Boolean);
+}
+
 // ---------- 메인 ----------
 export default async function handler(req, res) {
   const q = req.query || {};
@@ -163,6 +188,20 @@ export default async function handler(req, res) {
       if (id) out.commented.push(key); else out.skipped.push(key);
     } catch (e) { out.errors.push(String(e.message)); }
   };
+
+  const chatPost = async (key, body) => {
+    try {
+      const id = await db.rpc("bot_chat", { p_secret: secret, p_key: key, p_body: body.slice(0, 300) });
+      if (id) { (out.chatted = out.chatted || []).push(key); return key; }
+      out.skipped.push(key); return null;
+    } catch (e) { out.errors.push(String(e.message)); return null; }
+  };
+  if (q.mode === "chat") {
+    await chatSurge(chatPost);
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json(out);
+    return;
+  }
 
   const t = kstParts();
   const ymd = `${t.y}${t.mo}${t.d}`, ymdh = `${ymd}${t.hh}`;
@@ -196,7 +235,8 @@ export default async function handler(req, res) {
   // 2) 정시 브리핑 (09시는 아침 리포트로 대신)
   if ((t.mi < 20 || first) && (t.h !== 9 || first) && btc.krw) {
     const body = [`⏰ ${t.hh}시 정시 브리핑`, "", ...marketLines(m)].join("\n");
-    await post(`brief-${ymdh}`, "시황분석", `[정시 브리핑] ${t.hh}시 · BTC ₩${won(btc.krw)} (${sign(btc.day)})`, body, metaBtc);
+    const bid = await post(`brief-${ymdh}`, "시황분석", `[정시 브리핑] ${t.hh}시 · BTC ₩${won(btc.krw)} (${sign(btc.day)})`, body, metaBtc);
+    if (bid) await chatPost(`chatbrief-${ymdh}`, `📊 ${t.hh}시 정시 브리핑 · BTC ₩${won(btc.krw)} (${sign(btc.day)})${btc.kimp != null ? " · 김프 " + sign(btc.kimp) : ""} — 게시판에서 자세히 보기`);
   }
 
   // 3) 급등락 속보 (1시간 ±5%)
@@ -210,7 +250,8 @@ export default async function handler(req, res) {
       `전일 대비 ${sign(c.day)}${c.usd ? ` · 바이비트 $${num(c.usd, c.usd >= 1 ? 2 : 4)}` : ""}${c.kimp != null ? ` · 김프 ${sign(c.kimp)}` : ""}`, "",
       `${up ? "추격 매수 vs 차익 실현" : "저점 매수 vs 추가 하락"}, 여러분 생각은? 👇`,
     ].join("\n");
-    await post(`surge-${sym}-${up ? "u" : "d"}-${ymdh}`, "시황분석", `[속보] ${nm} 1시간 ${sign(c.h1)} ${up ? "급등" : "급락"} · ₩${won(c.krw)}`, body, { sym, price: c.krw });
+    const sid = await post(`surge-${sym}-${up ? "u" : "d"}-${ymdh}`, "시황분석", `[속보] ${nm} 1시간 ${sign(c.h1)} ${up ? "급등" : "급락"} · ₩${won(c.krw)}`, body, { sym, price: c.krw });
+    if (sid) await chatPost(`chatsurge-${sym}-${up ? "u" : "d"}-${ymdh}`, `${up ? "🚀" : "⚠️"} [속보] ${nm} 1시간 ${sign(c.h1)} ${up ? "급등" : "급락"} — 게시판에 토론 글이 올라왔어요`);
   }
 
   // 4) 뉴스 토론 (30분마다 새 기사 1건)

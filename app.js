@@ -752,7 +752,11 @@
       (j.items || []).slice(0, 15).forEach((n) => {
         const li = el("li");
         const a = el("a", "t", n.title); a.href = n.link; a.target = "_blank"; a.rel = "noopener noreferrer";
-        li.append(a, el("div", "m", [n.source, n.date ? ago(n.date) : ""].filter(Boolean).join(" · ")));
+        const meta = el("div", "m", [n.source, n.date ? ago(n.date) : ""].filter(Boolean).join(" · "));
+        const disc = el("button", "discuss", "💬 토론하기");
+        disc.onclick = () => window.__bitbuyDiscuss && window.__bitbuyDiscuss(n);
+        meta.append(disc);
+        li.append(a, meta);
         ul.append(li);
       });
       if (!ul.children.length) ul.append(el("li", "status", "표시할 뉴스가 없어요."));
@@ -769,18 +773,44 @@
   const cfg = window.BITBUY_CONFIG || {};
   const configured = cfg.SUPABASE_URL && cfg.SUPABASE_URL.startsWith("https://") && !cfg.SUPABASE_URL.includes("여기에") && cfg.SUPABASE_ANON_KEY && !cfg.SUPABASE_ANON_KEY.includes("여기에");
   const sb = configured && window.supabase ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
+  const IMG_PREFIX = configured ? cfg.SUPABASE_URL.replace(/\/$/, "") + "/storage/v1/object/public/images/" : "";
 
-  // 닉네임
+  // ---------- 닉네임 자동 생성 + 4자리 식별코드 ----------
+  // 이 브라우저만의 무작위 값에서 4자리 코드를 만들어 닉네임 뒤에 붙여요. 예) 존버고래(89c2)
+  const ADJ = ["존버", "떡상", "풀매수", "단타", "새벽", "불장", "익절", "야수", "차트", "김프", "알트", "스윙"];
+  const NOUN = ["고래", "개미", "러버", "도사", "요정", "장인", "헌터", "킹", "냥이", "곰", "황소", "펭귄"];
+  let deviceId = store.get("bitbuy.device", null);
+  if (!deviceId || !/^[0-9a-f]{16}$/.test(deviceId)) {
+    deviceId = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+    store.set("bitbuy.device", deviceId);
+  }
+  const myTag = (() => { let h = 2166136261; for (const ch of deviceId + "bitbuy") { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return ((h >>> 0) & 0xffff).toString(16).padStart(4, "0"); })();
   const nickInput = $("#nickInput");
-  nickInput.value = store.get("bitbuy.nick", "");
-  nickInput.addEventListener("change", () => store.set("bitbuy.nick", nickInput.value.trim()));
-  const myNick = () => nickInput.value.trim();
+  let savedNick = store.get("bitbuy.nick", "");
+  if (!savedNick || savedNick.length < 2) {
+    savedNick = ADJ[Math.floor(Math.random() * ADJ.length)] + NOUN[Math.floor(Math.random() * NOUN.length)];
+    store.set("bitbuy.nick", savedNick);
+  }
+  nickInput.value = savedNick;
+  $("#nickTag").textContent = "(" + myTag + ")";
+  nickInput.addEventListener("change", () => {
+    const v = nickInput.value.trim().slice(0, 8);
+    if (v.length >= 2) { nickInput.value = v; store.set("bitbuy.nick", v); } else nickInput.value = store.get("bitbuy.nick", savedNick);
+  });
+  const myNick = () => nickInput.value.trim().slice(0, 8);
   function needNick() {
     if (myNick().length >= 2) return false;
-    nickInput.focus(); nickInput.placeholder = "닉네임을 2자 이상 입력해 주세요"; nickInput.style.borderColor = "#f0505a";
+    nickInput.focus(); nickInput.style.borderColor = "#f0505a";
     setTimeout(() => (nickInput.style.borderColor = ""), 2500);
     return true;
   }
+  // 이름 표시: 봇이면 BOT 배지, 사람이면 닉네임(코드)
+  const who = (o) => {
+    const s = el("span", o.is_bot ? "bot-name" : "nick-name", o.nickname);
+    if (o.is_bot) s.prepend(el("b", "bot-badge", "BOT"));
+    else if (o.tag) s.append(el("span", "tag", "(" + o.tag + ")"));
+    return s;
+  };
 
   if (!sb) {
     const msg = "게시판과 채팅을 쓰려면 config.js에 Supabase 주소와 키를 넣어 주세요.\n(설치 안내서 3단계 참고)";
@@ -791,62 +821,92 @@
   }
 
   // ---------- 게시판 ----------
-  const CATS = ["전체", "자유", "시황분석", "질문", "뉴스토론"];
+  // 값(DB에 저장되는 이름) → 화면 표시 이름
+  const CATS = [["전체", "전체"], ["인기", "🔥 인기글"], ["시황분석", "시황/분석"], ["자유", "자유/잡담"], ["인증", "수익/손실 인증"], ["뉴스토론", "뉴스/정보"], ["질문", "질문"]];
+  const CAT_LABEL = Object.fromEntries(CATS);
+  const WRITE_CATS = CATS.filter(([v]) => v !== "전체" && v !== "인기");
+  const POPULAR = 5;           // 추천 5개 이상이면 인기글
+  const NEW_MIN = 30;          // 30분 이내 글은 NEW
   const PAGE = 20;
-  let curCat = "전체", view = "list", openId = null, posts = [], hasMore = false;
-  let liked = store.get("bitbuy.liked", []);
+  let curCat = "전체", view = "list", openId = null, posts = [], pinned = [], hasMore = false;
+  let liked = store.get("bitbuy.liked", []), disliked = store.get("bitbuy.disliked", []);
+  let hideBot = store.get("bitbuy.hideBot", false);
 
   const tabs = $("#tabs");
-  let hideBot = store.get("bitbuy.hideBot", false);
-  const who = (o) => { const s = el("span", o.is_bot ? "bot-name" : null, o.nickname); if (o.is_bot) s.prepend(el("b", "bot-badge", "BOT")); return s; };
-  CATS.forEach((c) => {
-    const b = el("button", c === curCat ? "on" : "", c);
-    b.onclick = () => { curCat = c; [...tabs.children].forEach((x) => { if (!x.classList.contains("bot-toggle")) x.classList.toggle("on", x === b); }); showList(true); };
-    tabs.append(b);
-  });
-  const botT = el("button", "bot-toggle" + (hideBot ? " on" : ""), hideBot ? "🤖 봇글 숨김" : "🤖 봇글 보기");
-  botT.onclick = () => { hideBot = !hideBot; store.set("bitbuy.hideBot", hideBot); botT.classList.toggle("on", hideBot); botT.textContent = hideBot ? "🤖 봇글 숨김" : "🤖 봇글 보기"; showList(true); };
-  tabs.append(botT);
+  function renderTabs() {
+    tabs.textContent = "";
+    CATS.forEach(([v, label]) => {
+      const b = el("button", (v === curCat ? "on" : "") + (v === "인기" ? " hot" : ""), label);
+      b.onclick = () => { curCat = v; renderTabs(); showList(true); };
+      tabs.append(b);
+    });
+    const botT = el("button", "bot-toggle" + (hideBot ? " on" : ""), hideBot ? "🤖 봇글 숨김" : "🤖 봇글 보기");
+    botT.onclick = () => { hideBot = !hideBot; store.set("bitbuy.hideBot", hideBot); renderTabs(); showList(true); };
+    tabs.append(botT);
+  }
+  renderTabs();
   $("#writeBtn").onclick = () => showWrite();
 
   const boardView = $("#boardView");
   function boardMsg(text) { boardView.textContent = ""; boardView.append(el("div", "empty", text)); }
+  const COLS = "id,cat,title,nickname,tag,likes,dislikes,images,created_at,is_bot,comments(count)";
 
   async function fetchPosts(reset) {
     const from = reset ? 0 : posts.length;
-    let q = sb.from("posts").select("id,cat,title,nickname,likes,created_at,is_bot,comments(count)")
-      .order("created_at", { ascending: false }).range(from, from + PAGE - 1);
-    if (curCat !== "전체") q = q.eq("cat", curCat);
+    let q = sb.from("posts").select(COLS);
+    if (curCat === "인기") q = q.gte("likes", POPULAR).order("likes", { ascending: false });
+    else q = q.order("created_at", { ascending: false });
+    q = q.range(from, from + PAGE - 1);
+    if (curCat !== "전체" && curCat !== "인기") q = q.eq("cat", curCat);
     if (hideBot) q = q.eq("is_bot", false);
     const { data, error } = await q;
     if (error) throw error;
     posts = reset ? data : posts.concat(data);
     hasMore = data.length === PAGE;
+    // '전체' 첫 화면에는 최근 2일 인기글 3개를 위에 고정
+    if (reset && curCat === "전체") {
+      const since = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+      const r = await sb.from("posts").select(COLS).gte("likes", POPULAR).gte("created_at", since).order("likes", { ascending: false }).limit(3);
+      pinned = r.data || [];
+    } else if (reset) pinned = [];
   }
 
   async function showList(reset) {
     view = "list"; openId = null;
+    if (location.hash.startsWith("#post-")) history.replaceState(null, "", location.pathname);
     if (reset) boardMsg("불러오는 중…");
     try { await fetchPosts(reset); } catch (_) { boardMsg("게시판을 불러오지 못했어요."); return; }
     if (view !== "list") return;
     renderList();
   }
 
+  function postRow(p, isPinned) {
+    const row = el("div", "post" + (p.is_bot ? " is-bot" : "") + (isPinned ? " pinned" : ""));
+    row.append(el("span", "cat", isPinned ? "🔥 인기" : (CAT_LABEL[p.cat] || p.cat)));
+    const box = el("div", "pbox");
+    const ti = el("div", "ti");
+    ti.append(el("span", null, p.title));
+    const cnt = (p.comments && p.comments[0] && p.comments[0].count) || 0;
+    if (cnt) ti.append(el("span", "ccount", `[${cnt}]`));
+    if (p.images && p.images.length) ti.append(el("span", "imgicon", "🖼"));
+    if (Date.now() - Date.parse(p.created_at) < NEW_MIN * 60000) ti.append(el("b", "new-badge", "NEW"));
+    if (p.likes >= POPULAR && !isPinned) ti.append(el("span", "hoticon", "🔥"));
+    box.append(ti);
+    const mt = el("div", "mt");
+    mt.append(who(p), el("span", null, ago(p.created_at)), el("span", null, "👍 " + p.likes), el("span", null, "👎 " + (p.dislikes || 0)));
+    box.append(mt); row.append(box);
+    row.onclick = () => showDetail(p.id);
+    return row;
+  }
+
   function renderList() {
     boardView.textContent = "";
-    if (!posts.length) { boardMsg("아직 글이 없어요.\n첫 글을 남겨 보세요!"); return; }
-    posts.forEach((p) => {
-      const row = el("div", "post" + (p.is_bot ? " is-bot" : ""));
-      row.append(el("span", "cat", p.cat));
-      const box = el("div");
-      box.append(el("div", "ti", p.title));
-      const cnt = (p.comments && p.comments[0] && p.comments[0].count) || 0;
-      const mt = el("div", "mt");
-      mt.append(who(p), el("span", null, ago(p.created_at)), el("span", null, "♥ " + p.likes), el("span", null, "💬 " + cnt));
-      box.append(mt); row.append(box);
-      row.onclick = () => showDetail(p.id);
-      boardView.append(row);
-    });
+    pinned.forEach((p) => boardView.append(postRow(p, true)));
+    if (!posts.length) {
+      boardView.append(el("div", "empty", curCat === "인기" ? `아직 추천 ${POPULAR}개 이상 받은 글이 없어요.` : "아직 글이 없어요.\n첫 글을 남겨 보세요!"));
+      return;
+    }
+    posts.forEach((p) => boardView.append(postRow(p, false)));
     if (hasMore) {
       const more = el("button", "btn ghost more", "더 보기");
       more.onclick = async () => { more.disabled = true; try { await fetchPosts(false); renderList(); } catch (_) { more.disabled = false; } };
@@ -854,34 +914,109 @@
     }
   }
 
-  function showWrite() {
+  // ---------- 이미지 (붙여넣기·선택 → 줄여서 업로드) ----------
+  async function shrinkImage(file) {
+    if (file.type === "image/gif" && file.size < 3 * 1024 * 1024) return { blob: file, ext: "gif", type: "image/gif" };
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url; });
+      const max = 1600, sc = Math.min(1, max / Math.max(img.width, img.height));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      const blob = await new Promise((ok) => cv.toBlob(ok, "image/jpeg", 0.85));
+      return { blob, ext: "jpg", type: "image/jpeg" };
+    } finally { URL.revokeObjectURL(url); }
+  }
+  async function uploadImage(file) {
+    const { blob, ext, type } = await shrinkImage(file);
+    if (blob.size > 3 * 1024 * 1024) throw new Error("이미지가 너무 커요 (3MB 이하)");
+    const path = `p/${new Date().toISOString().slice(0, 10)}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error } = await sb.storage.from("images").upload(path, blob, { contentType: type, upsert: false });
+    if (error) throw error;
+    return IMG_PREFIX + path;
+  }
+
+  function showWrite(prefill) {
     view = "write";
     boardView.textContent = "";
     const f = el("form", "form");
-    const sel = el("select"); CATS.slice(1).forEach((c) => { const o = el("option", null, c); o.value = c; sel.append(o); });
-    if (curCat !== "전체") sel.value = curCat;
+    const sel = el("select");
+    WRITE_CATS.forEach(([v, label]) => { const o = el("option", null, label); o.value = v; sel.append(o); });
+    sel.value = (prefill && prefill.cat) || (WRITE_CATS.some(([v]) => v === curCat) ? curCat : "자유");
     const ti = el("input"); ti.placeholder = "제목 (2~80자)"; ti.maxLength = 80;
-    const bd = el("textarea"); bd.placeholder = "내용을 입력하세요.\n투자 권유·리딩방 홍보·개인정보 게시는 삭제됩니다."; bd.maxLength = 5000;
+    const bd = el("textarea"); bd.placeholder = "내용을 입력하세요.\n📷 차트 캡처는 Ctrl+V로 바로 붙여넣을 수 있어요. (최대 4장)\n투자 권유·리딩방 홍보·개인정보 게시는 삭제됩니다."; bd.maxLength = 5000;
+    if (prefill) { ti.value = (prefill.title || "").slice(0, 80); bd.value = prefill.body || ""; }
+    const imgs = []; // {url}
+    const thumbs = el("div", "thumbs");
+    const imgBtn = el("button", "btn ghost", "📷 이미지"); imgBtn.type = "button";
+    const fileIn = el("input"); fileIn.type = "file"; fileIn.accept = "image/*"; fileIn.multiple = true; fileIn.style.display = "none";
+    const imgNote = el("span", "muted small", "");
     const err = el("div", "err");
+    function renderThumbs() {
+      thumbs.textContent = "";
+      imgs.forEach((it, i) => {
+        const w = el("div", "thumb");
+        const im = el("img"); im.src = it.url; im.alt = "";
+        const x = el("button", "x", "✕"); x.type = "button"; x.onclick = () => { imgs.splice(i, 1); renderThumbs(); };
+        w.append(im, x); thumbs.append(w);
+      });
+      imgNote.textContent = imgs.length ? `${imgs.length}/4장` : "";
+    }
+    async function addFiles(files) {
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) continue;
+        if (imgs.length >= 4) { err.textContent = "이미지는 4장까지 올릴 수 있어요."; break; }
+        imgNote.textContent = "업로드 중…";
+        try { imgs.push({ url: await uploadImage(file) }); renderThumbs(); err.textContent = ""; }
+        catch (e) { err.textContent = "이미지 업로드 실패: " + (e.message || e); renderThumbs(); }
+      }
+    }
+    imgBtn.onclick = () => fileIn.click();
+    fileIn.onchange = () => { addFiles([...fileIn.files]); fileIn.value = ""; };
+    bd.addEventListener("paste", (e) => {
+      const files = [...(e.clipboardData ? e.clipboardData.items : [])].filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter(Boolean);
+      if (files.length) { e.preventDefault(); addFiles(files); }
+    });
+    bd.addEventListener("dragover", (e) => e.preventDefault());
+    bd.addEventListener("drop", (e) => { const fs = [...e.dataTransfer.files]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
+
     const row = el("div", "row");
     const ok = el("button", "btn", "등록"); ok.type = "submit";
     const cancel = el("button", "btn ghost", "취소"); cancel.type = "button"; cancel.onclick = () => showList(true);
+    const tools = el("div", "row tools"); tools.append(imgBtn, imgNote, fileIn);
     row.append(ok, cancel);
-    f.append(el("div", "mt", "작성자: " + (myNick() || "(오른쪽 채팅창에서 닉네임을 정해 주세요)")), sel, ti, bd, err, row);
+    const by = el("div", "mt"); by.append(el("span", null, "작성자: "), who({ nickname: myNick(), tag: myTag }));
+    f.append(by, sel, ti, bd, tools, thumbs, err, row);
     f.onsubmit = async (e) => {
       e.preventDefault();
-      if (needNick()) { err.textContent = "먼저 채팅창 위에서 닉네임을 정해 주세요."; return; }
+      if (needNick()) { err.textContent = "채팅창 위에서 닉네임을 정해 주세요."; return; }
       const title = ti.value.trim(), body = bd.value.trim();
       if (title.length < 2 || body.length < 2) { err.textContent = "제목과 내용을 2자 이상 입력해 주세요."; return; }
       const last = store.get("bitbuy.lastPost", 0);
       if (Date.now() - last < 30000) { err.textContent = "글은 30초에 한 번만 쓸 수 있어요."; return; }
       ok.disabled = true;
-      const { data, error } = await sb.from("posts").insert({ cat: sel.value, title, body, nickname: myNick() }).select("id").single();
+      const row = { cat: sel.value, title, body, nickname: myNick(), tag: myTag };
+      if (imgs.length) row.images = imgs.map((x) => x.url);
+      const { data, error } = await sb.from("posts").insert(row).select("id").single();
       if (error) { ok.disabled = false; err.textContent = "저장하지 못했어요: " + error.message; return; }
       store.set("bitbuy.lastPost", Date.now());
       showDetail(data.id);
     };
-    boardView.append(f); ti.focus();
+    boardView.append(f);
+    (prefill ? bd : ti).focus();
+  }
+  // 뉴스의 [토론하기] 버튼에서 부르는 입구
+  window.__bitbuyDiscuss = (n) => {
+    $("#board").scrollIntoView({ behavior: "smooth", block: "start" });
+    showWrite({ cat: "뉴스토론", title: "[토론] " + n.title, body: `📰 ${n.source || "뉴스"}\n${n.link}\n\n` });
+  };
+
+  function linkify(text, box) {
+    String(text).split(/(https?:\/\/[^\s]+)/g).forEach((part, i) => {
+      if (i % 2) { const a = el("a", null, part.length > 60 ? part.slice(0, 57) + "…" : part); a.href = part; a.target = "_blank"; a.rel = "noopener noreferrer nofollow ugc"; box.append(a); }
+      else box.append(document.createTextNode(part));
+    });
   }
 
   async function showDetail(id) {
@@ -893,30 +1028,40 @@
     boardView.textContent = "";
     const d = el("div", "detail");
     const back = el("button", "btn ghost", "← 목록"); back.onclick = () => showList(true);
-    const dm = el("div", "mt"); dm.append(el("span", null, p.cat + " · "), who(p), el("span", null, " · " + ago(p.created_at)));
-    const bodyEl = el("div", "body");
-    // 본문의 링크만 눌러서 열 수 있게 (나머지는 그대로 글자로)
-    String(p.body).split(/(https?:\/\/[^\s]+)/g).forEach((part, i) => {
-      if (i % 2) { const a = el("a", null, part.length > 60 ? part.slice(0, 57) + "…" : part); a.href = part; a.target = "_blank"; a.rel = "noopener noreferrer nofollow"; bodyEl.append(a); }
-      else bodyEl.append(document.createTextNode(part));
-    });
+    const dm = el("div", "mt"); dm.append(el("span", null, (CAT_LABEL[p.cat] || p.cat) + " · "), who(p), el("span", null, " · " + ago(p.created_at)));
+    const bodyEl = el("div", "body"); linkify(p.body, bodyEl);
     d.append(back, el("h3", null, p.title), dm, bodyEl);
+    // 이미지: 우리 저장소 주소만 표시
+    const pics = (p.images || []).filter((u) => typeof u === "string" && IMG_PREFIX && u.startsWith(IMG_PREFIX));
+    if (pics.length) {
+      const g = el("div", "pics");
+      pics.forEach((u) => { const a = el("a"); a.href = u; a.target = "_blank"; a.rel = "noopener"; const im = el("img"); im.src = u; im.alt = "첨부 이미지"; im.loading = "lazy"; a.append(im); g.append(a); });
+      d.append(g);
+    }
 
     const acts = el("div", "actions");
-    const isLiked = liked.includes(id);
-    const like = el("button", "btn ghost", (isLiked ? "♥ " : "♡ ") + "추천 " + p.likes);
-    like.disabled = isLiked;
-    like.onclick = async () => {
-      like.disabled = true;
+    const up = el("button", "btn ghost", (liked.includes(id) ? "👍 " : "👍 추천 ") + p.likes);
+    const down = el("button", "btn ghost", (disliked.includes(id) ? "👎 " : "👎 비추천 ") + (p.dislikes || 0));
+    const voted = liked.includes(id) || disliked.includes(id);
+    up.disabled = down.disabled = voted;
+    up.onclick = async () => {
+      up.disabled = down.disabled = true;
       const { data: n, error: e2 } = await sb.rpc("like_post", { pid: id });
-      if (e2) { like.disabled = false; return; }
+      if (e2) { up.disabled = down.disabled = false; return; }
       liked.push(id); store.set("bitbuy.liked", liked.slice(-500));
-      like.textContent = "♥ 추천 " + n;
+      up.textContent = "👍 " + n;
+      if (n === POPULAR) up.textContent += " 🔥 인기글 등극!";
     };
-    acts.append(like);
+    down.onclick = async () => {
+      up.disabled = down.disabled = true;
+      const { data: n, error: e2 } = await sb.rpc("dislike_post", { pid: id });
+      if (e2) { up.disabled = down.disabled = false; return; }
+      disliked.push(id); store.set("bitbuy.disliked", disliked.slice(-500));
+      down.textContent = "👎 " + n;
+    };
     const share = el("button", "btn ghost", "링크 복사");
     share.onclick = async () => { try { await navigator.clipboard.writeText(location.origin + "/#post-" + id); share.textContent = "복사됨!"; } catch (_) {} };
-    acts.append(share);
+    acts.append(up, down, share);
     d.append(acts);
 
     const cw = el("div", "cmts"); cw.append(el("h2", null, "댓글"));
@@ -930,7 +1075,7 @@
       if (needNick()) return;
       const t = ci.value.trim(); if (!t) return;
       cb.disabled = true;
-      const { error: e3 } = await sb.from("comments").insert({ post_id: id, body: t, nickname: myNick() });
+      const { error: e3 } = await sb.from("comments").insert({ post_id: id, body: t, nickname: myNick(), tag: myTag });
       cb.disabled = false;
       if (!e3) { ci.value = ""; loadComments(); }
     };
@@ -941,10 +1086,10 @@
       list.textContent = "";
       if (!cs || !cs.length) { list.append(el("div", "status", "첫 댓글을 남겨 보세요.")); return; }
       cs.forEach((c) => {
-        const r = el("div", "cmt");
+        const r = el("div", "cmt" + (c.is_bot ? " is-bot" : ""));
         const w = el("div", "who"); w.append(who(c), el("span", null, " · " + ago(c.created_at)));
-        if (c.is_bot) r.classList.add("is-bot");
-        r.append(w, el("div", "tx", c.body));
+        const tx = el("div", "tx"); linkify(c.body, tx);
+        r.append(w, tx);
         list.append(r);
       });
     }
@@ -963,59 +1108,93 @@
 
   // ---------- 채팅 ----------
   const msgsEl = $("#msgs");
-  let chat = [];
-  function renderChat() {
-    const atBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80;
+  const newBtn = $("#newMsgBtn");
+  let chat = [], unseen = 0;
+  const atBottom = () => msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 60;
+  function renderChat(forceBottom) {
+    const stick = forceBottom || atBottom();
+    const prevH = msgsEl.scrollHeight, prevTop = msgsEl.scrollTop;
     msgsEl.textContent = "";
-    if (!chat.length) msgsEl.append(el("div", "status", "아직 대화가 없어요. 먼저 인사해 보세요 👋"));
-    const me = myNick();
+    if (!chat.length) msgsEl.append(el("div", "status", "아직 대화가 없어요. 아래 버튼으로 먼저 인사해 보세요 👋"));
     chat.forEach((c) => {
-      const mine = me && c.nickname === me && c.mine;
+      if (c.is_bot) {
+        const r = el("div", "msg sys");
+        const b = el("div", "bub"); b.append(el("div", "tx", c.body), el("div", "tm", hhmm(c.created_at)));
+        r.append(b); msgsEl.append(r); return;
+      }
+      const mine = c.tag === myTag;
       const r = el("div", "msg" + (mine ? " me" : ""));
       const b = el("div", "bub");
-      if (!mine) b.append(el("div", "nm", c.nickname));
+      if (!mine) { const nm = el("div", "nm"); nm.append(who(c)); b.append(nm); }
       b.append(el("div", "tx", c.body), el("div", "tm", hhmm(c.created_at)));
       r.append(b); msgsEl.append(r);
     });
-    if (atBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
+    if (stick) { msgsEl.scrollTop = msgsEl.scrollHeight; unseen = 0; }
+    else msgsEl.scrollTop = prevTop + (msgsEl.scrollHeight - prevH > 0 ? 0 : 0);
+    renderNewBtn();
   }
-  const myMsgIds = new Set(store.get("bitbuy.myMsgs", []));
+  function renderNewBtn() {
+    newBtn.hidden = unseen === 0;
+    newBtn.textContent = `↓ 새 메시지 ${unseen}개`;
+  }
+  newBtn.onclick = () => { unseen = 0; msgsEl.scrollTop = msgsEl.scrollHeight; renderNewBtn(); };
+  msgsEl.addEventListener("scroll", () => { if (atBottom() && unseen) { unseen = 0; renderNewBtn(); } });
   function addMsg(row) {
-    if (chat.some((c) => c.id === row.id)) return;
-    row.mine = myMsgIds.has(row.id);
+    if (chat.some((c) => c.id === row.id)) return false;
     chat.push(row); if (chat.length > 150) chat.shift();
+    return true;
   }
 
   (async () => {
     const { data, error } = await sb.from("chat").select("*").order("created_at", { ascending: false }).limit(60);
     if (error) { $("#chatState").textContent = "불러오기 실패"; return; }
     data.reverse().forEach(addMsg);
-    renderChat(); msgsEl.scrollTop = msgsEl.scrollHeight;
+    renderChat(true);
   })();
 
   sb.channel("chat-feed")
-    .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat" }, (payload) => { addMsg(payload.new); renderChat(); })
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat" }, (payload) => {
+      const wasBottom = atBottom();
+      if (!addMsg(payload.new)) return;
+      if (!wasBottom && payload.new.tag !== myTag) unseen++;
+      renderChat(payload.new.tag === myTag && !payload.new.is_bot);
+      // 봇 급등락 메시지는 짧게 소리로도 알림 (소리 켠 사람만)
+      if (payload.new.is_bot && S.soundOn && /급등|급락/.test(payload.new.body)) { ensureAudio(); beep(1250, audio.currentTime + 0.02, 0.12); }
+    })
     .subscribe((s) => { $("#chatState").textContent = s === "SUBSCRIBED" ? "● 실시간" : "연결 중…"; });
 
-  let lastSend = 0;
+  // 도배·링크 방지
+  const LINK_RE = /(https?:\/\/|www\.|t\.me\/|open\.kakao|bit\.ly|discord\.gg|\b[a-z0-9-]+\.(com|net|io|kr|xyz|me|gg|link|site|top)\b)/i;
+  let lastSend = 0, lastText = "", lastTextAt = 0;
+  const chatWarn = (t) => { const s = $("#chatState"); s.textContent = t; s.classList.add("warn"); setTimeout(() => { s.textContent = "● 실시간"; s.classList.remove("warn"); }, 2500); };
+  async function sendChat(text) {
+    if (needNick()) return false;
+    const t = text.trim();
+    if (!t) return false;
+    if (Date.now() - lastSend < 3000) { chatWarn("3초에 한 번만 보낼 수 있어요"); return false; }
+    if (t === lastText && Date.now() - lastTextAt < 30000) { chatWarn("같은 말을 반복할 수 없어요"); return false; }
+    if (LINK_RE.test(t)) { chatWarn("⚠ 링크는 채팅에 올릴 수 없어요"); return false; }
+    lastSend = Date.now(); lastText = t; lastTextAt = Date.now();
+    const btn = $("#chatSend"); btn.disabled = true;
+    const { data, error } = await sb.from("chat").insert({ nickname: myNick(), tag: myTag, body: t }).select().single();
+    btn.disabled = false;
+    if (error) { chatWarn("전송 실패"); return false; }
+    addMsg(data); renderChat(true);
+    return true;
+  }
   $("#chatForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (needNick()) return;
-    const inp = $("#chatInput"); const t = inp.value.trim();
-    if (!t) return;
-    if (Date.now() - lastSend < 2000) { $("#chatState").textContent = "천천히 입력해 주세요"; return; }
-    lastSend = Date.now();
-    const btn = $("#chatSend"); btn.disabled = true;
-    const { data, error } = await sb.from("chat").insert({ nickname: myNick(), body: t }).select().single();
-    btn.disabled = false;
-    if (error) { $("#chatState").textContent = "전송 실패"; return; }
-    myMsgIds.add(data.id); store.set("bitbuy.myMsgs", [...myMsgIds].slice(-300));
-    addMsg(data); chat.forEach((c) => { if (c.id === data.id) c.mine = true; });
-    inp.value = ""; renderChat(); msgsEl.scrollTop = msgsEl.scrollHeight; inp.focus();
+    const inp = $("#chatInput");
+    if (await sendChat(inp.value)) inp.value = "";
+    inp.focus();
   };
+  // 원클릭 리액션
+  const REACTS = ["🚀 가즈아", "💧 돔황챠", "🔥 불장", "🐳 고래 등장", "😭 물렸다", "🙏 존버", "📉 숏 가자", "🎉 익절"];
+  const rbox = $("#reacts");
+  REACTS.forEach((r) => { const b = el("button", null, r); b.type = "button"; b.onclick = () => sendChat(r); rbox.append(b); });
 
   // ---------- 접속자 수 ----------
-  const presence = sb.channel("online", { config: { presence: { key: Math.random().toString(36).slice(2) } } });
+  const presence = sb.channel("online", { config: { presence: { key: deviceId + Math.random().toString(36).slice(2, 6) } } });
   presence
     .on("presence", { event: "sync" }, () => {
       const n = Object.keys(presence.presenceState()).length;
@@ -1023,6 +1202,6 @@
     })
     .subscribe(async (s) => { if (s === "SUBSCRIBED") await presence.track({ at: Date.now() }); });
 
-  // "n분 전" 표시 갱신
+  // "n분 전", NEW 표시 갱신
   setInterval(() => { if (view === "list" && posts.length) renderList(); }, 60000);
 })();
