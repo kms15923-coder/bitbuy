@@ -41,22 +41,52 @@
     ["DOGE", "도지코인"], ["ADA", "에이다"], ["SUI", "수이"], ["LINK", "체인링크"],
   ];
   const COIN_NAME = Object.fromEntries(COINS);
-  const STOCKS = [
-    ["^IXIC", "나스닥"], ["NQ=F", "나스닥 선물"], ["NVDA", "엔비디아"], ["TSLA", "테슬라"],
-    ["AAPL", "애플"], ["MSFT", "마이크로소프트"], ["AMZN", "아마존"], ["GOOGL", "구글"],
-    ["META", "메타"], ["COIN", "코인베이스"], ["MSTR", "스트래티지"],
-  ];
-  const STOCK_NAME = Object.fromEntries(STOCKS);
+  const MARKETS = {
+    nasdaq: { name: "나스닥", list: [
+      ["^IXIC", "나스닥"], ["NQ=F", "나스닥 선물"], ["NVDA", "엔비디아"], ["TSLA", "테슬라"],
+      ["AAPL", "애플"], ["MSFT", "마이크로소프트"], ["AMZN", "아마존"], ["GOOGL", "구글"],
+      ["META", "메타"], ["COIN", "코인베이스"], ["MSTR", "스트래티지"],
+    ] },
+    kospi: { name: "코스피", list: [
+      ["^KS11", "코스피"], ["^KQ11", "코스닥"], ["005930.KS", "삼성전자"], ["000660.KS", "SK하이닉스"],
+      ["373220.KS", "LG에너지솔루션"], ["207940.KS", "삼성바이오"], ["005380.KS", "현대차"],
+      ["068270.KS", "셀트리온"], ["035420.KS", "NAVER"], ["035720.KS", "카카오"], ["012450.KS", "한화에어로"],
+    ] },
+  };
+  const STOCK_NAME = Object.fromEntries(Object.values(MARKETS).flatMap((m) => m.list));
+  const marketOf = (sym) => /\.(KS|KQ)$|^\^K(S|Q)11$/.test(sym) ? "kospi" : "nasdaq";
+
+  // ---------- 접속자 수 표시 (유령 인원 포함) ----------
+  // 실제 접속자 + 아래 범위의 표시용 인원. 실제 이용자가 늘면 on: false 로 끄세요.
+  const GHOST = { on: true, min: 50, max: 100 };
+  let realOnline = 0;
+  function ghostCount() {
+    if (!GHOST.on) return 0;
+    const t = Date.now() / 1000;
+    // 모든 방문자에게 비슷한 숫자가 보이도록 시간에 따라 천천히 변하는 값
+    const wave = 0.5 + 0.35 * Math.sin(t / 1700) + 0.15 * Math.sin(t / 310 + 1.3);
+    const jitter = Math.sin(Math.floor(t / 20) * 12.9898) * 0.5 + 0.5; // 20초마다 살짝 변동
+    const span = GHOST.max - GHOST.min;
+    return Math.round(GHOST.min + Math.min(1, Math.max(0, wave * 0.92 + jitter * 0.08)) * span);
+  }
+  function renderOnline() {
+    const n = realOnline + ghostCount();
+    const e = document.querySelector("#onlineCount");
+    if (e) e.textContent = (n || 1) + "명 접속 중";
+    const c = document.querySelector("#chatOnline");
+    if (c) c.textContent = (n || 1) + "명 참여 중";
+  }
+  setInterval(renderOnline, 5000);
 
   // =====================================================
   //  급등락 알림 (소리 · 음성 · 화면)
   // =====================================================
   const ALL_TH = [1, 2, 5, 10, 15, 20, 25, 30];
   const S = Object.assign({
-    th: ALL_TH.slice(), ref: "bar", targets: { coin: true, stock: true }, voice: true, vol: 85, vvol: 100, soundOn: false,
+    th: ALL_TH.slice(), ref: "bar", targets: { coin: true, stock: true }, voice: true, vol: 85, vvol: 100, voiceName: "google", soundOn: false,
   }, store.get("bitbuy.alerts", {}));
   S.soundOn = false; // 브라우저 정책상 매번 클릭으로 켜야 함
-  const saveS = () => store.set("bitbuy.alerts", { th: S.th, ref: S.ref, targets: S.targets, voice: S.voice, vol: S.vol, vvol: S.vvol });
+  const saveS = () => store.set("bitbuy.alerts", { th: S.th, ref: S.ref, targets: S.targets, voice: S.voice, vol: S.vol, vvol: S.vvol, voiceName: S.voiceName });
 
   // 소리 출력: 오실레이터 → 압축기(찢어지지 않게 크게) → 마스터 볼륨
   let audio = null, master = null;
@@ -104,21 +134,27 @@
     }
     return Math.round((at - audio.currentTime) * 1000);
   }
-  // 멘트: 서버(/api/tts)에서 한국어 음성 파일을 받아 알림음처럼 크게 증폭해서 재생
-  //       실패하면 기기에 내장된 음성(speechSynthesis)으로 대신 읽음
+  // 멘트: 서버(/api/tts)에서 한국어 여성 음성 파일을 받아 크게 증폭해서 재생
+  //       (증폭 → 압축 → 보정 증폭 → 부드러운 클리핑: 찢어지지 않으면서 최대한 크게)
+  //       실패하면 기기에 내장된 한국어 여성 음성으로 대신 읽음
   const ttsCache = new Map();
-  let vgain = null, vSrc = null;
+  let vPre = null, vSrc = null, lastVoiceInfo = "";
   function voiceOut() {
     if (!ensureAudio()) return null;
-    if (!vgain) {
+    if (!vPre) {
+      vPre = audio.createGain();
       const comp = audio.createDynamicsCompressor();
-      comp.threshold.value = -20; comp.knee.value = 6; comp.ratio.value = 10;
-      comp.attack.value = 0.003; comp.release.value = 0.15;
-      vgain = audio.createGain();
-      vgain.connect(comp).connect(audio.destination);
+      comp.threshold.value = -32; comp.knee.value = 4; comp.ratio.value = 20;
+      comp.attack.value = 0.001; comp.release.value = 0.08;
+      const makeup = audio.createGain(); makeup.gain.value = 5;
+      const clip = audio.createWaveShaper();
+      const curve = new Float32Array(2048);
+      for (let i = 0; i < curve.length; i++) { const x = (i / (curve.length - 1)) * 2 - 1; curve[i] = Math.tanh(2.2 * x) / Math.tanh(2.2); }
+      clip.curve = curve; clip.oversample = "4x";
+      vPre.connect(comp).connect(makeup).connect(clip).connect(audio.destination);
     }
-    vgain.gain.value = (S.vvol / 100) * 4; // 최대 4배 증폭
-    return vgain;
+    vPre.gain.value = (S.vvol / 100) * 12; // 이전보다 약 3배 크게
+    return vPre;
   }
   async function ttsBuffer(text) {
     if (ttsCache.has(text)) return ttsCache.get(text);
@@ -132,27 +168,44 @@
     p.catch(() => ttsCache.delete(text));
     return p;
   }
-  function speakFallback(text) {
+  // 기기 내장 한국어 음성 중 여성 음성을 우선으로
+  const FEMALE = /(SunHi|Sun-Hi|Heami|Yuna|Sora|Jiyoung|JiMin|Seoyeon|Google 한국|female|여성|여자)/i;
+  const MALE = /(InJoon|Hyunsu|BongJin|GookMin|Minsu|male|남성|남자)/i;
+  function koVoices() {
+    if (!("speechSynthesis" in window)) return [];
+    const vs = speechSynthesis.getVoices().filter((v) => /^ko/i.test(v.lang));
+    const score = (v) => (FEMALE.test(v.name) ? 0 : MALE.test(v.name) ? 2 : 1);
+    return vs.sort((a, b) => score(a) - score(b));
+  }
+  function speakDevice(text, name) {
     if (!("speechSynthesis" in window)) return;
     try {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = "ko-KR"; u.volume = Math.min(1, S.vvol / 100); u.rate = 1.0;
-      const ko = speechSynthesis.getVoices().find((v) => /ko/i.test(v.lang));
-      if (ko) u.voice = ko;
+      const vs = koVoices();
+      const v = (name && vs.find((x) => x.name === name)) || vs.find((x) => !MALE.test(x.name)) || vs[0];
+      if (v) u.voice = v;
+      u.lang = "ko-KR"; u.volume = 1; u.rate = 1.05; u.pitch = 1.25; // 밝고 젊은 톤
+      lastVoiceInfo = "기기 음성" + (v ? ": " + v.name : "");
       speechSynthesis.speak(u);
     } catch (_) {}
   }
   async function speak(text) {
     if (!S.voice) return;
+    if (S.voiceName && S.voiceName !== "google") { speakDevice(text, S.voiceName); showVoiceInfo(); return; }
     const out = voiceOut();
-    if (!out) { speakFallback(text); return; }
+    if (!out) { speakDevice(text); showVoiceInfo(); return; }
     try {
       const buf = await ttsBuffer(text);
       try { vSrc && vSrc.stop(); } catch (_) {}
-      vSrc = audio.createBufferSource(); vSrc.buffer = buf; vSrc.connect(out); vSrc.start();
-    } catch (_) { speakFallback(text); }
+      vSrc = audio.createBufferSource(); vSrc.buffer = buf;
+      vSrc.playbackRate.value = 1.1; // 살짝 높고 빠르게 → 더 젊은 목소리
+      vSrc.connect(out); vSrc.start();
+      lastVoiceInfo = "구글 여성 음성 (증폭)";
+    } catch (_) { speakDevice(text); }
+    showVoiceInfo();
   }
+  function showVoiceInfo() { const e = document.querySelector("#voiceInfo"); if (e) e.textContent = lastVoiceInfo ? "재생: " + lastVoiceInfo : ""; }
   // 소리 → (다 울린 뒤) 멘트
   let speakTimer = null;
   function announce(dir, t, name) {
@@ -220,7 +273,7 @@
     S.th = S.th.includes(t) ? S.th.filter((x) => x !== t) : S.th.concat(t); saveS();
   });
   chipGroup($("#refChips"), [["bar", "현재 봉 시가 대비"], ["day", "전일 종가 대비"]], (v) => S.ref === v, (v) => { S.ref = v; saveS(); });
-  chipGroup($("#targetChips"), [["coin", "코인 차트"], ["stock", "나스닥 차트"]], (v) => S.targets[v], (v) => { S.targets[v] = !S.targets[v]; saveS(); });
+  chipGroup($("#targetChips"), [["coin", "코인 차트"], ["stock", "주식 차트"]], (v) => S.targets[v], (v) => { S.targets[v] = !S.targets[v]; saveS(); });
   const voiceChip = $("#voiceChip");
   const syncVoice = () => { voiceChip.classList.toggle("on", S.voice); voiceChip.textContent = S.voice ? "🗣 멘트 켜짐" : "🗣 멘트 꺼짐"; };
   voiceChip.onclick = () => { S.voice = !S.voice; saveS(); syncVoice(); };
@@ -231,7 +284,7 @@
   vvolEl.value = S.vvol; vvolNum.textContent = S.vvol;
   volEl.oninput = () => { S.vol = Number(volEl.value); volNum.textContent = S.vol; if (master) master.gain.value = (S.vol / 100) * 3; saveS(); };
   volEl.onchange = () => { ensureAudio(); beep(950, audio.currentTime + 0.02, 0.15); }; // 손을 떼면 미리 듣기
-  vvolEl.oninput = () => { S.vvol = Number(vvolEl.value); vvolNum.textContent = S.vvol; if (vgain) vgain.gain.value = (S.vvol / 100) * 4; saveS(); };
+  vvolEl.oninput = () => { S.vvol = Number(vvolEl.value); vvolNum.textContent = S.vvol; if (vPre) vPre.gain.value = (S.vvol / 100) * 12; saveS(); };
   vvolEl.onchange = () => speak("비트코인 1퍼센트 급등");
   const soundBtn = $("#soundBtn");
   const syncSound = () => { soundBtn.classList.toggle("on", S.soundOn); soundBtn.textContent = S.soundOn ? "🔔 소리 켜짐" : "🔇 소리 꺼짐"; };
@@ -240,6 +293,16 @@
     if (S.soundOn) { ensureAudio(); beep(950, audio.currentTime + 0.02, 0.15); }
   };
   // 테스트: 선택한 %로 실제와 똑같이 울림
+  const voiceSel = $("#voiceSel");
+  function fillVoices() {
+    voiceSel.textContent = "";
+    const g = el("option", null, "구글 여성 음성 (크게, 추천)"); g.value = "google"; voiceSel.append(g);
+    koVoices().forEach((v) => { const o = el("option", null, "기기 음성: " + v.name + (MALE.test(v.name) ? " (남성)" : FEMALE.test(v.name) ? " (여성)" : "")); o.value = v.name; voiceSel.append(o); });
+    voiceSel.value = [...voiceSel.options].some((o) => o.value === S.voiceName) ? S.voiceName : "google";
+  }
+  fillVoices();
+  if ("speechSynthesis" in window) speechSynthesis.addEventListener ? speechSynthesis.addEventListener("voiceschanged", fillVoices) : (speechSynthesis.onvoiceschanged = fillVoices);
+  voiceSel.onchange = () => { S.voiceName = voiceSel.value; saveS(); speak("비트코인 1퍼센트 급등"); };
   const testTh = $("#testTh");
   ALL_TH.forEach((t) => { const o = el("option", null, t + "% (" + (ALL_TH.indexOf(t) + 1) + "번)"); o.value = t; testTh.append(o); });
   testTh.value = "2";
@@ -426,40 +489,53 @@
   }
 
   // =====================================================
-  //  나스닥 차트 (야후 파이낸스, 서버 함수 경유)
+  //  주식 차트: 나스닥 / 코스피 (야후 파이낸스, 서버 함수 경유)
   // =====================================================
   const ST = Object.assign({ sym: "^IXIC", iv: "1" }, store.get("bitbuy.stockView", {}));
+  ST.mkt = marketOf(ST.sym);
   if (!IV_SEC[ST.iv]) ST.iv = "1";
   const sBox = $("#sChart");
   const sCh = makeChart(sBox);
   let sLast = null, sSeq = 0, sData = null, sTimer = null;
   const stockLabel = (sym) => STOCK_NAME[sym] || sym;
+  const sfmt = (n, d) => n == null ? "—" : d && d.currency === "KRW" ? fmt(n, d.symbol.startsWith("^") ? 2 : 0) : usd(n);
 
   function renderStockButtons() {
     const box = $("#stockBtns"); box.textContent = "";
-    const list = STOCKS.slice();
+    Object.entries(MARKETS).forEach(([k, m]) => {
+      const b = el("button", "ex" + (k === ST.mkt ? " on" : ""), m.name);
+      b.onclick = () => { if (ST.mkt === k) return; pickStock(m.list[0][0]); };
+      box.append(b);
+    });
+    box.append(el("span", "sep"));
+    const list = MARKETS[ST.mkt].list.slice();
     if (!STOCK_NAME[ST.sym]) list.push([ST.sym, ST.sym]);
     list.forEach(([sym, nm]) => {
       const b = el("button", sym === ST.sym ? "on" : "", nm);
       b.onclick = () => pickStock(sym);
       box.append(b);
     });
-    const f = el("form"); const inp = el("input"); inp.placeholder = "종목코드"; inp.maxLength = 12;
+    const f = el("form"); const inp = el("input"); inp.placeholder = ST.mkt === "kospi" ? "6자리 코드" : "종목코드"; inp.maxLength = 12;
     f.append(inp);
-    f.onsubmit = (e) => { e.preventDefault(); const v = inp.value.trim().toUpperCase(); if (/^[A-Z0-9.^=\-]{1,12}$/.test(v)) pickStock(v); };
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      let v = inp.value.trim().toUpperCase();
+      if (/^\d{6}$/.test(v)) v += ".KS"; // 예: 005930 → 005930.KS
+      if (/^[A-Z0-9.^=\-]{1,12}$/.test(v)) pickStock(v);
+    };
     box.append(f);
     ivButtons($("#sIvs"), ST.iv, (v) => { ST.iv = v; store.set("bitbuy.stockView", ST); renderStockButtons(); loadStock(); });
   }
-  function pickStock(sym) { ST.sym = sym; store.set("bitbuy.stockView", ST); renderStockButtons(); loadStock(); }
+  function pickStock(sym) { ST.sym = sym; ST.mkt = marketOf(sym); store.set("bitbuy.stockView", ST); renderStockButtons(); loadStock(); }
 
   function renderStockHead() {
     const d = sData;
     $("#sName").textContent = d ? `${stockLabel(d.symbol)} · ${d.symbol}${d.name && d.name !== d.symbol ? " · " + d.name : ""}` : `${stockLabel(ST.sym)} · ${ST.sym}`;
     if (!d || d.price == null) { $("#sPrice").textContent = "—"; $("#sChg").textContent = "—"; return; }
     const r = d.prevClose ? d.price / d.prevClose - 1 : null;
-    const pe = $("#sPrice"); pe.textContent = (d.currency === "USD" && !d.symbol.startsWith("^") ? "$" : "") + usd(d.price); pe.className = "big mono " + cls(r);
+    const pe = $("#sPrice"); pe.textContent = (d.currency === "USD" && !d.symbol.startsWith("^") ? "$" : d.currency === "KRW" && !d.symbol.startsWith("^") ? "₩" : "") + sfmt(d.price, d); pe.className = "big mono " + cls(r);
     const ce = $("#sChg"); ce.textContent = pct(r); ce.className = "mono chg " + cls(r);
-    $("#sSub").textContent = d.prevClose ? `전일 종가 ${usd(d.prevClose)} · ${d.currency}` : d.currency;
+    $("#sSub").textContent = d.prevClose ? `전일 종가 ${sfmt(d.prevClose, d)} · ${d.currency}` : d.currency;
     $("#sState").textContent = d.state ? "● " + d.state : "";
     queueTicker();
   }
@@ -482,13 +558,13 @@
       sData = j; renderStockHead();
       if (!j.candles.length) { overlay(sBox, "표시할 데이터가 없어요. (장 시작 전이거나 종목코드를 확인해 주세요)"); return; }
       const bars = toKst(j.candles);
-      setPrecision(sCh.candle, bars[bars.length - 1].close, true);
+      if (j.currency === "KRW") sCh.candle.applyOptions({ priceFormat: { type: "price", precision: j.symbol.startsWith("^") ? 2 : 0, minMove: j.symbol.startsWith("^") ? 0.01 : 1 } }); else setPrecision(sCh.candle, bars[bars.length - 1].close, true);
       sCh.candle.setData(bars);
       sCh.vol.setData(bars.map(volBar));
       sCh.chart.timeScale().fitContent();
       sLast = { ...bars[bars.length - 1] };
       overlay(sBox, null);
-      $("#sStatus").textContent = `야후 파이낸스 · ${IV_NAME[ST.iv]}봉 · ${ST.iv === "1" ? "15초" : "1분"}마다 갱신 · 약간 지연될 수 있음`;
+      $("#sStatus").textContent = `야후 파이낸스 · ${IV_NAME[ST.iv]}봉 · ${ST.iv === "1" ? "15초" : "1분"}마다 갱신 · ${ST.mkt === "kospi" ? "국내 시세는 지연될 수 있음" : "약간 지연될 수 있음"}`;
       stockAlert();
     } catch (_) {
       if (seq === sSeq) overlay(sBox, "주식 데이터를 불러오지 못했어요.\n종목코드를 확인하거나 잠시 후 다시 시도해 주세요.");
@@ -513,7 +589,7 @@
   function stockAlert() {
     if (!sData || sData.price == null) return;
     const name = stockLabel(sData.symbol);
-    const priceText = usd(sData.price);
+    const priceText = sfmt(sData.price, sData);
     if (S.ref === "day") checkAlert("stock", name, sData.price, sData.prevClose, "day" + sData.prevClose, priceText, "전일 종가");
     else if (sLast) checkAlert("stock", name, sData.price, sLast.open, `${ST.iv}@${sLast.time}`, priceText, `${IV_NAME[ST.iv]}봉 시가`);
   }
@@ -556,7 +632,7 @@
     if (usdtKrw) { const sp = el("span", null, "USDT"); sp.append(el("strong", "mono", "₩" + krw(usdtKrw))); tk.append(sp); }
     if (sData && sData.price != null) {
       const r = sData.prevClose ? sData.price / sData.prevClose - 1 : null;
-      const sp = el("span", null, stockLabel(sData.symbol)); sp.append(el("strong", "mono " + cls(r), usd(sData.price) + " " + pct(r))); tk.append(sp);
+      const sp = el("span", null, stockLabel(sData.symbol)); sp.append(el("strong", "mono " + cls(r), sfmt(sData.price, sData) + " " + pct(r))); tk.append(sp);
     }
     if (!tk.children.length) tk.append(el("span", null, "시세 연결 중…"));
   }
@@ -646,6 +722,7 @@
     } catch (_) {}
   });
 
+  renderOnline();
   renderCoinButtons(); renderCoinHead(); loadCoin();
   renderStockButtons(); loadStock();
 
@@ -914,7 +991,7 @@
   presence
     .on("presence", { event: "sync" }, () => {
       const n = Object.keys(presence.presenceState()).length;
-      $("#onlineCount").textContent = n + "명 접속 중";
+      realOnline = n; renderOnline();
     })
     .subscribe(async (s) => { if (s === "SUBSCRIBED") await presence.track({ at: Date.now() }); });
 
