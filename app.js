@@ -53,50 +53,76 @@
   // =====================================================
   const ALL_TH = [1, 2, 5, 10, 15, 20, 25, 30];
   const S = Object.assign({
-    th: ALL_TH.slice(), ref: "bar", targets: { coin: true, stock: true }, voice: true, vol: 70, soundOn: false,
+    th: ALL_TH.slice(), ref: "bar", targets: { coin: true, stock: true }, voice: true, vol: 85, vvol: 100, soundOn: false,
   }, store.get("bitbuy.alerts", {}));
   S.soundOn = false; // 브라우저 정책상 매번 클릭으로 켜야 함
-  const saveS = () => store.set("bitbuy.alerts", { th: S.th, ref: S.ref, targets: S.targets, voice: S.voice, vol: S.vol });
+  const saveS = () => store.set("bitbuy.alerts", { th: S.th, ref: S.ref, targets: S.targets, voice: S.voice, vol: S.vol, vvol: S.vvol });
 
-  let audio = null;
+  // 소리 출력: 오실레이터 → 압축기(찢어지지 않게 크게) → 마스터 볼륨
+  let audio = null, master = null;
   function ensureAudio() {
-    if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) { audio = null; } }
+    if (!audio) {
+      try {
+        audio = new (window.AudioContext || window.webkitAudioContext)();
+        const comp = audio.createDynamicsCompressor();
+        comp.threshold.value = -18; comp.knee.value = 6; comp.ratio.value = 8;
+        comp.attack.value = 0.002; comp.release.value = 0.12;
+        master = audio.createGain();
+        comp.connect(master).connect(audio.destination);
+        master._in = comp;
+      } catch (_) { audio = null; }
+    }
     if (audio && audio.state === "suspended") audio.resume();
+    if (master) master.gain.value = (S.vol / 100) * 3; // 최대 3배 증폭
     return audio;
   }
-  function beep(freq, start, dur, type) {
-    const ctx = audio; if (!ctx) return;
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type; o.frequency.value = freq;
-    const v = (S.vol / 100) * 0.35;
-    g.gain.setValueAtTime(0.0001, start);
-    g.gain.exponentialRampToValueAtTime(Math.max(v, 0.0002), start + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-    o.connect(g).connect(ctx.destination);
-    o.start(start); o.stop(start + dur + 0.02);
+  function beep(freq, start, dur) {
+    if (!audio) return;
+    // 사각파 + 톱니파를 겹쳐 경보음처럼 크고 또렷하게
+    ["square", "sawtooth"].forEach((type, i) => {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = type; o.frequency.value = freq * (i ? 1.005 : 1);
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(i ? 0.35 : 0.6, start + 0.01);
+      g.gain.setValueAtTime(i ? 0.35 : 0.6, start + dur - 0.04);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      o.connect(g).connect(master._in);
+      o.start(start); o.stop(start + dur + 0.02);
+    });
   }
-  // 퍼센트가 클수록 더 많이, 더 길게 울림 (급등: 올라가는 소리 / 급락: 내려가는 소리)
+  // 1% → 1번, 2% → 2번, 5% → 3번 … 30% → 8번 울림 (급등: 올라가는 소리 / 급락: 내려가는 소리)
+  // 다 울린 뒤 걸리는 시간(ms)을 돌려줌
   function playAlert(dir, t) {
-    if (!ensureAudio()) return;
-    const idx = Math.max(0, ALL_TH.indexOf(t));
-    const rounds = [1, 1, 2, 2, 3, 3, 4, 4][idx];
-    const now = audio.currentTime + 0.02;
-    const notes = dir === "up" ? [660, 880, 1175] : [880, 660, 440];
-    let at = now;
+    if (!ensureAudio()) return 0;
+    const rounds = Math.max(0, ALL_TH.indexOf(t)) + 1;
+    const notes = dir === "up" ? [700, 950, 1250] : [1250, 950, 700];
+    const nd = 0.12, gap = 0.22;
+    let at = audio.currentTime + 0.03;
     for (let r = 0; r < rounds; r++) {
-      notes.forEach((f, i) => beep(f, at + i * 0.11, 0.16, dir === "up" ? "sine" : "triangle"));
-      at += notes.length * 0.11 + 0.18;
+      notes.forEach((f, i) => beep(f, at + i * nd, nd - 0.01));
+      at += notes.length * nd + gap;
     }
+    return Math.round((at - audio.currentTime) * 1000);
   }
   function speak(text) {
     if (!S.voice || !("speechSynthesis" in window)) return;
     try {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = "ko-KR"; u.volume = Math.min(1, S.vol / 100 + 0.2); u.rate = 1.05;
+      u.lang = "ko-KR"; u.volume = S.vvol / 100; u.rate = 1.0;
+      const ko = speechSynthesis.getVoices().find((v) => /ko/i.test(v.lang));
+      if (ko) u.voice = ko;
       speechSynthesis.speak(u);
     } catch (_) {}
   }
+  // 소리 → (다 울린 뒤) 멘트
+  let speakTimer = null;
+  function announce(dir, t, name) {
+    const ms = playAlert(dir, t);
+    clearTimeout(speakTimer);
+    speakTimer = setTimeout(() => speak(`${name} ${t}퍼센트 ${dir === "up" ? "급등" : "급락"}`), ms + 100);
+  }
+  if ("speechSynthesis" in window) { try { speechSynthesis.getVoices(); speechSynthesis.onvoiceschanged = () => speechSynthesis.getVoices(); } catch (_) {} }
 
   const logEl = $("#alertLog");
   function fire(target, name, dir, t, pctNow, price, refName) {
@@ -119,7 +145,7 @@
     panel.classList.add(dir === "up" ? "flash-up" : "flash-down");
     setTimeout(() => panel.classList.remove("flash-up", "flash-down"), 2500);
 
-    if (S.soundOn) { playAlert(dir, t); speak(`${name} ${t}퍼센트 ${word}`); }
+    if (S.soundOn) announce(dir, t, name);
   }
 
   const alertState = { coin: { key: null, fired: new Set(), primed: false }, stock: { key: null, fired: new Set(), primed: false } };
@@ -158,22 +184,28 @@
   chipGroup($("#refChips"), [["bar", "현재 봉 시가 대비"], ["day", "전일 종가 대비"]], (v) => S.ref === v, (v) => { S.ref = v; saveS(); });
   chipGroup($("#targetChips"), [["coin", "코인 차트"], ["stock", "나스닥 차트"]], (v) => S.targets[v], (v) => { S.targets[v] = !S.targets[v]; saveS(); });
   const voiceChip = $("#voiceChip");
-  const syncVoice = () => voiceChip.classList.toggle("on", S.voice);
+  const syncVoice = () => { voiceChip.classList.toggle("on", S.voice); voiceChip.textContent = S.voice ? "🗣 멘트 켜짐" : "🗣 멘트 꺼짐"; };
   voiceChip.onclick = () => { S.voice = !S.voice; saveS(); syncVoice(); };
   syncVoice();
-  const volEl = $("#vol"); volEl.value = S.vol;
-  volEl.oninput = () => { S.vol = Number(volEl.value); saveS(); };
+  const volEl = $("#vol"), volNum = $("#volNum");
+  const vvolEl = $("#vvol"), vvolNum = $("#vvolNum");
+  volEl.value = S.vol; volNum.textContent = S.vol;
+  vvolEl.value = S.vvol; vvolNum.textContent = S.vvol;
+  volEl.oninput = () => { S.vol = Number(volEl.value); volNum.textContent = S.vol; if (master) master.gain.value = (S.vol / 100) * 3; saveS(); };
+  volEl.onchange = () => { ensureAudio(); beep(950, audio.currentTime + 0.02, 0.15); }; // 손을 떼면 미리 듣기
+  vvolEl.oninput = () => { S.vvol = Number(vvolEl.value); vvolNum.textContent = S.vvol; saveS(); };
+  vvolEl.onchange = () => speak("음성 안내 크기");
   const soundBtn = $("#soundBtn");
   const syncSound = () => { soundBtn.classList.toggle("on", S.soundOn); soundBtn.textContent = S.soundOn ? "🔔 소리 켜짐" : "🔇 소리 꺼짐"; };
   soundBtn.onclick = () => {
     S.soundOn = !S.soundOn; syncSound();
-    if (S.soundOn) { ensureAudio(); beep(880, audio ? audio.currentTime + 0.02 : 0, 0.12, "sine"); }
+    if (S.soundOn) { ensureAudio(); beep(950, audio.currentTime + 0.02, 0.15); }
   };
-  const test = (dir) => {
-    ensureAudio(); playAlert(dir, 2);
-    const nm = COIN_NAME[C.coin] || C.coin;
-    speak(`${nm} 2퍼센트 ${dir === "up" ? "급등" : "급락"}`);
-  };
+  // 테스트: 선택한 %로 실제와 똑같이 울림
+  const testTh = $("#testTh");
+  ALL_TH.forEach((t) => { const o = el("option", null, t + "% (" + (ALL_TH.indexOf(t) + 1) + "번)"); o.value = t; testTh.append(o); });
+  testTh.value = "2";
+  const test = (dir) => { const nm = COIN_NAME[C.coin] || C.coin; announce(dir, Number(testTh.value), nm); };
   $("#testUp").onclick = () => test("up");
   $("#testDown").onclick = () => test("down");
 

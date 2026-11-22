@@ -97,10 +97,17 @@
       <div class="arow">
         <span class="k">소리</span>
         <div class="chips">
-          <label class="vol">음량 <input type="range" id="vol" min="0" max="100" value="70"></label>
-          <button class="chip" id="voiceChip">🗣 음성 안내</button>
-          <button class="chip ghost" id="testUp">▲ 급등 소리 듣기</button>
-          <button class="chip ghost" id="testDown">▼ 급락 소리 듣기</button>
+          <label class="vol">🔊 알림음 <input type="range" id="vol" min="0" max="100" value="85"><b class="mono" id="volNum">85</b></label>
+          <label class="vol">🗣 멘트 <input type="range" id="vvol" min="0" max="100" value="100"><b class="mono" id="vvolNum">100</b></label>
+          <button class="chip" id="voiceChip">음성 멘트 켜기</button>
+        </div>
+      </div>
+      <div class="arow">
+        <span class="k">테스트</span>
+        <div class="chips">
+          <select id="testTh" class="test-sel"></select>
+          <button class="chip ghost" id="testUp">▲ 급등 듣기</button>
+          <button class="chip ghost" id="testDown">▼ 급락 듣기</button>
         </div>
       </div>
       <div class="alog-wrap">
