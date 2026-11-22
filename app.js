@@ -122,9 +122,9 @@
   }
   // 1% → 1번, 2% → 2번, 5% → 3번 … 30% → 8번 울림 (급등: 올라가는 소리 / 급락: 내려가는 소리)
   // 다 울린 뒤 걸리는 시간(ms)을 돌려줌
-  function playAlert(dir, t) {
+  function playAlert(dir, t) { return playRounds(dir, Math.max(0, ALL_TH.indexOf(t)) + 1); }
+  function playRounds(dir, rounds) {
     if (!ensureAudio()) return 0;
-    const rounds = Math.max(0, ALL_TH.indexOf(t)) + 1;
     const notes = dir === "up" ? [700, 950, 1250] : [1250, 950, 700];
     const nd = 0.12, gap = 0.22;
     let at = audio.currentTime + 0.03;
@@ -686,6 +686,7 @@
         const sym = code.slice(4); if (!mk[sym]) return;
         mk[sym].krw = price; mk[sym].rate = rate;
         queueTicker();
+        checkPriceTargets(sym);
         if (sym === C.coin) {
           renderCoinHead();
           if (!isBybit()) { liveUpbitBar(price); coinAlert(price); }
@@ -706,7 +707,10 @@
   }
   const bybitOpen = (ws) => {
     bybitWs = ws; bybitKlineTopic = null;
-    ws.send(JSON.stringify({ op: "subscribe", args: COINS.map(([s]) => `tickers.${s}USDT`) }));
+    const topics = COINS.map(([s]) => `tickers.${s}USDT`)
+      .concat(COINS.map(([s]) => `allLiquidation.${s}USDT`))
+      .concat(["publicTrade.BTCUSDT", "publicTrade.ETHUSDT"]);
+    for (let i = 0; i < topics.length; i += 10) ws.send(JSON.stringify({ op: "subscribe", args: topics.slice(i, i + 10) }));
     bybitSubKline();
     clearInterval(bybitPing);
     bybitPing = setInterval(() => { try { ws.send(JSON.stringify({ op: "ping" })); } catch (_) {} }, 20000);
@@ -716,6 +720,8 @@
     try {
       const m = JSON.parse(ev.data);
       if (!m.topic) return;
+      if (m.topic.startsWith("allLiquidation.")) { (Array.isArray(m.data) ? m.data : [m.data]).forEach(onLiquidation); return; }
+      if (m.topic.startsWith("publicTrade.")) { if (Array.isArray(m.data)) onTrades(m.data); return; }
       if (m.topic.startsWith("tickers.")) {
         const sym = m.topic.slice(8).replace(/USDT$/, "");
         const d = m.data || {};
@@ -723,6 +729,7 @@
         if (d.lastPrice != null) mk[sym].usd = +d.lastPrice;
         if (d.price24hPcnt != null) mk[sym].urate = +d.price24hPcnt;
         queueTicker();
+        if (d.lastPrice != null) checkPriceTargets(sym);
         if (sym === C.coin) {
           renderCoinHead();
           if (isBybit() && d.lastPrice != null) coinAlert(+d.lastPrice);
@@ -734,6 +741,269 @@
       }
     } catch (_) {}
   });
+
+  // =====================================================
+  //  v6: 핵심 지표 위젯 · 경제 일정 · 고래/청산 피드 · 가격/김프 알림
+  // =====================================================
+  // ---- 한국어로 가격 읽기 (멘트용) ----
+  function sayKrw(n) {
+    n = Math.round(n);
+    if (n >= 1e8) {
+      const e = Math.floor(n / 1e8), m = Math.floor((n % 1e8) / 1e4);
+      const mm = m === 0 ? "" : m % 1000 === 0 ? ` ${m / 1000}천만` : ` ${m}만`;
+      return `${e}억${mm}원`;
+    }
+    if (n >= 1e4) { const m = Math.floor(n / 1e4), r = n % 1e4; return `${m}만${r ? " " + r : ""}원`; }
+    return `${n}원`;
+  }
+  function sayUsd(n) {
+    if (n >= 1e4) { const m = Math.floor(n / 1e4), r = Math.round(n % 1e4); return `${m}만${r ? " " + r : ""} 달러`; }
+    return `${n >= 1 ? Math.round(n * 100) / 100 : n} 달러`;
+  }
+  // 일반 알림 (가격·김프 등): 로그 + 화면 알림 + 소리 n번 + 멘트
+  function fireCustom(dir, title, sub, speech, rounds) {
+    const li = el("li");
+    li.append(el("span", "t", hhmmss(Date.now())), el("span", dir === "up" ? "up" : "down", (dir === "up" ? "▲ " : "▼ ") + title), el("span", "muted", sub ? `(${sub})` : ""));
+    if (logEl.firstChild && logEl.firstChild.classList.contains("muted")) logEl.textContent = "";
+    logEl.prepend(li);
+    while (logEl.children.length > 30) logEl.lastChild.remove();
+    const box = $("#toasts");
+    const tst = el("div", "toast " + dir, (dir === "up" ? "▲ " : "▼ ") + title);
+    if (sub) tst.append(el("small", null, sub));
+    box.prepend(tst); setTimeout(() => tst.remove(), 7000);
+    while (box.children.length > 4) box.lastChild.remove();
+    if (S.soundOn) {
+      const ms = playRounds(dir, rounds);
+      clearTimeout(speakTimer);
+      speakTimer = setTimeout(() => speak(speech), ms + 100);
+    }
+  }
+
+  // ---- 지표 카드 ----
+  let fxRate = null;
+  function drawGauge(v) {
+    const svg = $("#iFngSvg"); if (!svg) return;
+    const a = Math.PI * (1 - Math.max(0, Math.min(100, v)) / 100);
+    const x = 60 + 48 * Math.cos(a), y = 60 - 48 * Math.sin(a);
+    const col = v < 25 ? "#3b82f6" : v < 45 ? "#60a5fa" : v < 56 ? "#8a96a6" : v < 75 ? "#f59e0b" : "#f0505a";
+    svg.innerHTML = `<path d="M12 60 A48 48 0 0 1 108 60" fill="none" stroke="#232a33" stroke-width="10" stroke-linecap="round"/>` +
+      `<path d="M12 60 A48 48 0 0 1 ${x.toFixed(1)} ${y.toFixed(1)}" fill="none" stroke="${col}" stroke-width="10" stroke-linecap="round"/>` +
+      `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="#e8ecf1"/>`;
+  }
+  async function loadMarket() {
+    try {
+      const r = await fetch("/api/market");
+      if (!r.ok) throw 0;
+      const j = await r.json();
+      if (j.fng) {
+        const e = $("#iFng"); e.textContent = j.fng.value;
+        e.className = "v mono " + (j.fng.value >= 55 ? "up" : j.fng.value <= 45 ? "down" : "");
+        $("#iFngSub").textContent = j.fng.label + (j.fng.prev != null ? ` · 어제 ${j.fng.prev}` : "");
+        drawGauge(j.fng.value);
+      }
+      if (j.dominance) {
+        $("#iDom").textContent = j.dominance.btc.toFixed(1) + "%";
+        $("#iDomSub").textContent = (j.dominance.eth ? `ETH ${j.dominance.eth.toFixed(1)}% · ` : "") + (j.dominance.btc >= 55 ? "비트 독주" : j.dominance.btc <= 45 ? "알트 강세" : "균형");
+      }
+      if (j.usdkrw && j.usdkrw.price) { fxRate = j.usdkrw.price; renderFx(j.usdkrw.prev); }
+      if (j.ls) renderLs(j.ls.long, j.ls.short, j.ls.src);
+      else lsFallback();
+    } catch (_) { lsFallback(); }
+  }
+  function renderFx(prev) {
+    if (!fxRate) return;
+    const e = $("#iFx"); e.textContent = "₩" + fmt(fxRate, 1);
+    const r = prev ? fxRate / prev - 1 : null;
+    e.className = "v mono " + cls(r);
+    const tp = usdtKrw ? usdtKrw / fxRate - 1 : null;
+    $("#iFxSub").textContent = `USDT ₩${usdtKrw ? fmt(usdtKrw, 0) : "—"}${tp != null ? " · 테더 프리미엄 " + pct(tp) : ""}`;
+  }
+  function renderLs(l, s, src) {
+    const tot = l + s || 1, lp = l / tot;
+    $("#iLsL").style.width = (lp * 100).toFixed(1) + "%";
+    $("#iLsLt").textContent = "롱 " + (lp * 100).toFixed(1) + "%";
+    $("#iLsRt").textContent = "숏 " + ((1 - lp) * 100).toFixed(1) + "%";
+    $("#iLsSrc").textContent = src ? "· " + src : "";
+  }
+  // 서버에서 못 받으면 내 브라우저에서 바이비트로 직접
+  async function lsFallback() {
+    try {
+      const j = await (await fetch("https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=1h&limit=1")).json();
+      const x = j.result.list[0]; renderLs(+x.buyRatio, +x.sellRatio, "바이비트");
+    } catch (_) {}
+  }
+  function renderKimpCard() {
+    const k = kimchi("BTC"), e = $("#iKimp");
+    if (!e) return;
+    e.textContent = k == null ? "—" : pct(k);
+    e.className = "v mono " + cls(k);
+    const m = mk.BTC;
+    $("#iKimpSub").textContent = m.krw && m.usd ? `₩${krw(m.krw)} / $${usd(m.usd)}` : "업비트 vs 바이비트";
+    renderFx();
+  }
+  loadMarket(); setInterval(loadMarket, 2 * 60 * 1000);
+  setInterval(renderKimpCard, 2000);
+
+  // ---- 경제 일정 카운트다운 ----
+  let EVENTS = [];
+  fetch("/events.json").then((r) => r.json()).then((j) => {
+    EVENTS = (j.events || []).map((e) => ({ ...e, ts: Date.parse(e.t) })).filter((e) => isFinite(e.ts)).sort((a, b) => a.ts - b.ts);
+    tickEvent();
+  }).catch(() => { $("#iEvName").textContent = "일정 없음"; });
+  const kstStr = (ts) => { const d = new Date(ts + 9 * 3600000); return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`; };
+  function tickEvent() {
+    if (!EVENTS.length) return;
+    const now = Date.now();
+    const live = EVENTS.find((e) => now >= e.ts && now < e.ts + 30 * 60000);
+    const up = EVENTS.filter((e) => e.ts > now);
+    const card = $("#cEvent");
+    if (live) {
+      card.className = "card event-card live";
+      $("#iEvName").textContent = "🔴 " + live.name;
+      $("#iEvCount").textContent = "발표됨 — 변동성 주의!";
+    } else if (up.length) {
+      const e = up[0], s = Math.floor((e.ts - now) / 1000);
+      const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      card.className = "card event-card" + (s < 3 * 3600 ? " soon" : "");
+      $("#iEvName").textContent = e.name;
+      $("#iEvCount").textContent = `D-${d} ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")} · ${kstStr(e.ts)} KST`;
+    } else { $("#iEvName").textContent = "등록된 일정 없음"; $("#iEvCount").textContent = "events.json에 추가해 주세요"; }
+    const nx = up.slice(live ? 0 : 1, (live ? 0 : 1) + 2);
+    $("#iEvNext").textContent = nx.length ? "다음: " + nx.map((e) => `${e.name.replace("미국 ", "")} ${kstStr(e.ts).split(" ")[0]}`).join(" · ") : "";
+    // 발표 10분 전 알림 (한 번만)
+    const soon = up.find((e) => e.ts - now <= 10 * 60000 && e.ts - now > 9 * 60000);
+    if (soon && !tickEvent.done?.[soon.t]) {
+      tickEvent.done = { ...(tickEvent.done || {}), [soon.t]: 1 };
+      fireCustom("up", `10분 뒤 ${soon.name}`, kstStr(soon.ts) + " KST", `10분 뒤 ${soon.name.replace(/\(.*\)/, "")} 발표`, 2);
+    }
+  }
+  setInterval(tickEvent, 1000);
+
+  // ---- 고래 체결 · 대규모 청산 피드 (바이비트 실시간) ----
+  const WHALE_USD = { BTC: 1000000, ETH: 500000 };   // 이 금액 이상 체결이면 고래
+  const LIQ_MIN = 20000, LIQ_BIG = 500000;            // 청산은 2만 달러부터 표시, 50만 달러 이상은 대형
+  const feedBox = $("#feedItems");
+  let feedFirst = true;
+  const money = (v) => v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : "$" + Math.round(v / 1e3) + "K";
+  function feedPush(html, cls2) {
+    if (feedFirst) { feedBox.textContent = ""; feedFirst = false; }
+    const it = el("span", "it " + (cls2 || ""));
+    it.append(el("span", "t", hhmm(Date.now())));
+    html.forEach(([t, c]) => it.append(el("span", c || null, t)));
+    feedBox.prepend(it);
+    while (feedBox.children.length > 25) feedBox.lastChild.remove();
+  }
+  // 바이비트: allLiquidation 의 S=Buy 는 롱 포지션 청산, S=Sell 은 숏 포지션 청산
+  function onLiquidation(d) {
+    const sym = String(d.s).replace(/USDT$/, ""), v = +d.v * +d.p;
+    if (!(v >= LIQ_MIN)) return;
+    const longLiq = d.S === "Buy";
+    feedPush([[`💥 ${COIN_NAME[sym] || sym} ${longLiq ? "롱" : "숏"} 청산 `, longLiq ? "down" : "up"], [money(v), "mono"], [` @ ${usd(+d.p)}`, "muted"]], v >= LIQ_BIG ? "feed-big" : "");
+    if (v >= LIQ_BIG && S.soundOn) { ensureAudio(); beep(longLiq ? 500 : 1100, audio.currentTime + 0.02, 0.1); }
+  }
+  // 같은 시각·같은 방향 체결을 모아서 큰 주문 찾기
+  const tradeAgg = {};
+  function onTrades(list) {
+    for (const t of list) {
+      const sym = String(t.s).replace(/USDT$/, ""), key = sym + t.S + t.T;
+      tradeAgg[key] = (tradeAgg[key] || { sym, S: t.S, v: 0, p: +t.p, T: t.T });
+      tradeAgg[key].v += +t.v * +t.p;
+    }
+    const now = Date.now();
+    for (const [k, a] of Object.entries(tradeAgg)) {
+      if (now - a.T < 400) continue; // 같은 체결이 더 올 수 있어 잠깐 기다림
+      delete tradeAgg[k];
+      if (a.v >= (WHALE_USD[a.sym] || 1e9)) {
+        const buy = a.S === "Buy";
+        feedPush([[`🐋 ${COIN_NAME[a.sym]} 고래 ${buy ? "매수" : "매도"} `, buy ? "up" : "down"], [money(a.v), "mono"], [` @ ${usd(a.p)}`, "muted"]], "feed-big");
+      }
+    }
+  }
+  setInterval(() => onTrades([]), 1000);
+
+  // ---- 가격 목표 알림 ----
+  S.pt = Array.isArray(S.pt) ? S.pt : store.get("bitbuy.pt", []);
+  const savePt = () => store.set("bitbuy.pt", S.pt);
+  const ptSym = $("#ptSym"), ptCur = $("#ptCur"), ptPrice = $("#ptPrice");
+  COINS.forEach(([s, nm]) => { const o = el("option", null, nm); o.value = s; ptSym.append(o); });
+  ptSym.value = C.coin;
+  const ptNowText = () => {
+    const m = mk[ptSym.value]; const p = ptCur.value === "krw" ? m.krw : m.usd;
+    $("#ptNow").textContent = p == null ? "" : "현재 " + (ptCur.value === "krw" ? "₩" + krw(p) : "$" + usd(p));
+  };
+  ptSym.onchange = ptCur.onchange = ptNowText;
+  setInterval(ptNowText, 2000);
+  const ptLabel = (t) => `${COIN_NAME[t.sym]} ${t.cur === "krw" ? "₩" + krw(t.price) : "$" + usd(t.price)} ${t.dir === "up" ? "▲돌파" : "▼이탈"}`;
+  function renderPt() {
+    const box = $("#ptList"); box.textContent = "";
+    $("#ptListRow").hidden = !S.pt.length;
+    S.pt.forEach((t) => {
+      const c = el("span", "pt-chip " + (t.dir === "up" ? "up" : "down"), ptLabel(t));
+      const x = el("button", null, "✕"); x.type = "button"; x.title = "삭제";
+      x.onclick = () => { S.pt = S.pt.filter((y) => y.id !== t.id); savePt(); renderPt(); };
+      c.append(x); box.append(c);
+    });
+  }
+  $("#ptAdd").onclick = () => {
+    const price = parseFloat(String(ptPrice.value).replace(/[,\s₩$원]/g, ""));
+    if (!(price > 0)) { ptPrice.focus(); return; }
+    const m = mk[ptSym.value]; const now = ptCur.value === "krw" ? m.krw : m.usd;
+    if (S.pt.length >= 20) return;
+    S.pt.push({ id: Date.now().toString(36), sym: ptSym.value, cur: ptCur.value, price, dir: now != null && now > price ? "down" : "up" });
+    savePt(); renderPt(); ptPrice.value = "";
+  };
+  ptPrice.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#ptAdd").click(); });
+  renderPt();
+  function checkPriceTargets(sym) {
+    if (!S.pt.length) return;
+    const m = mk[sym]; let changed = false;
+    S.pt = S.pt.filter((t) => {
+      if (t.sym !== sym) return true;
+      const p = t.cur === "krw" ? m.krw : m.usd;
+      if (p == null) return true;
+      const hit = t.dir === "up" ? p >= t.price : p <= t.price;
+      if (!hit) return true;
+      changed = true;
+      const priceSay = t.cur === "krw" ? sayKrw(t.price) : sayUsd(t.price);
+      fireCustom(t.dir, `${COIN_NAME[sym]} 목표가 ${t.dir === "up" ? "돌파" : "이탈"}`, `${ptLabel(t)} · 현재 ${t.cur === "krw" ? "₩" + krw(p) : "$" + usd(p)}`,
+        `${COIN_NAME[sym]} ${priceSay} ${t.dir === "up" ? "돌파" : "이탈"}`, 3);
+      return false; // 한 번 울리면 목록에서 빠짐
+    });
+    if (changed) { savePt(); renderPt(); }
+  }
+
+  // ---- 김프 알림 ----
+  S.km = Object.assign({ on: true, up: 3, down: -1, jump: 1 }, S.km || store.get("bitbuy.km", {}));
+  const saveKm = () => store.set("bitbuy.km", S.km);
+  const kmOn = $("#kmOn"), kmUp = $("#kmUp"), kmDown = $("#kmDown"), kmJump = $("#kmJump");
+  kmUp.value = S.km.up; kmDown.value = S.km.down; kmJump.value = S.km.jump;
+  const syncKm = () => { kmOn.classList.toggle("on", S.km.on); kmOn.textContent = S.km.on ? "김프 알림 켜짐" : "김프 알림 꺼짐"; };
+  kmOn.onclick = () => { S.km.on = !S.km.on; saveKm(); syncKm(); };
+  [[kmUp, "up"], [kmDown, "down"], [kmJump, "jump"]].forEach(([inp, k]) => inp.onchange = () => {
+    const v = parseFloat(inp.value); if (isFinite(v)) { S.km[k] = v; saveKm(); kmArm = { up: true, down: true }; } else inp.value = S.km[k];
+  });
+  syncKm();
+  let kmArm = { up: true, down: true }, kmHist = [], kmJumpAt = 0, kmPrimed = false;
+  function checkKimp() {
+    const k = kimchi("BTC"); if (k == null) return;
+    const v = k * 100, now = Date.now();
+    kmHist.push([now, v]); kmHist = kmHist.filter(([t]) => now - t <= 10 * 60000 + 5000);
+    if (!S.km.on) return;
+    if (!kmPrimed) { kmPrimed = true; if (v >= S.km.up) kmArm.up = false; if (v <= S.km.down) kmArm.down = false; return; } // 켜자마자 울리지 않게
+    if (kmArm.up && v >= S.km.up) { kmArm.up = false; fireCustom("up", `김프 ${S.km.up}% 돌파`, `현재 김프 ${v.toFixed(2)}%`, `김프 ${S.km.up}퍼센트 돌파`, 2); }
+    if (!kmArm.up && v < S.km.up - 0.3) kmArm.up = true;
+    if (kmArm.down && v <= S.km.down) { kmArm.down = false; fireCustom("down", `김프 ${S.km.down}% 이하`, `현재 김프 ${v.toFixed(2)}%`, `김프 ${S.km.down}퍼센트 이하`, 2); }
+    if (!kmArm.down && v > S.km.down + 0.3) kmArm.down = true;
+    const old = kmHist.find(([t]) => now - t >= 9 * 60000);
+    if (old && now - kmJumpAt > 10 * 60000) {
+      const d = v - old[1];
+      if (Math.abs(d) >= S.km.jump) {
+        kmJumpAt = now;
+        fireCustom(d > 0 ? "up" : "down", `김프 급변 ${d > 0 ? "+" : ""}${d.toFixed(2)}%p`, `10분 전 ${old[1].toFixed(2)}% → 지금 ${v.toFixed(2)}%`, `김프 급변 ${Math.abs(d).toFixed(1)}퍼센트 ${d > 0 ? "상승" : "하락"}`, 2);
+      }
+    }
+  }
+  setInterval(checkKimp, 3000);
 
   renderOnline();
   renderCoinButtons(); renderCoinHead(); loadCoin();
@@ -792,7 +1062,7 @@
     store.set("bitbuy.nick", savedNick);
   }
   nickInput.value = savedNick;
-  $("#nickTag").textContent = "(" + myTag + ")";
+  const nickTagEl = $("#nickTag"); if (nickTagEl) nickTagEl.textContent = "(" + myTag + ")";
   nickInput.addEventListener("change", () => {
     const v = nickInput.value.trim().slice(0, 8);
     if (v.length >= 2) { nickInput.value = v; store.set("bitbuy.nick", v); } else nickInput.value = store.get("bitbuy.nick", savedNick);
@@ -849,7 +1119,16 @@
 
   const boardView = $("#boardView");
   function boardMsg(text) { boardView.textContent = ""; boardView.append(el("div", "empty", text)); }
-  const COLS = "id,cat,title,nickname,tag,likes,dislikes,images,created_at,is_bot,comments(count)";
+  let COLS = "id,cat,title,nickname,tag,likes,dislikes,images,created_at,is_bot,comments(count)";
+  const OLD_COLS = "id,cat,title,nickname,likes,created_at,comments(count)";
+  let dbOld = false; // update_v5.sql 실행 전 DB인지
+  const isMissingCol = (e) => e && (e.code === "PGRST204" || e.code === "42703" || /column|schema cache/i.test(e.message || ""));
+  function markOld() {
+    if (dbOld) return;
+    dbOld = true; COLS = OLD_COLS;
+    const n = el("div", "db-warn", "⚠ 데이터베이스 업데이트가 필요해요: Supabase SQL Editor에서 update_v5.sql을 실행하면 식별코드·비추천·이미지·봇 알림이 켜져요.");
+    document.querySelector("#board").prepend(n);
+  }
 
   async function fetchPosts(reset) {
     const from = reset ? 0 : posts.length;
@@ -858,8 +1137,9 @@
     else q = q.order("created_at", { ascending: false });
     q = q.range(from, from + PAGE - 1);
     if (curCat !== "전체" && curCat !== "인기") q = q.eq("cat", curCat);
-    if (hideBot) q = q.eq("is_bot", false);
-    const { data, error } = await q;
+    if (hideBot && !dbOld) q = q.eq("is_bot", false);
+    let { data, error } = await q;
+    if (error && isMissingCol(error) && !dbOld) { markOld(); return fetchPosts(reset); }
     if (error) throw error;
     posts = reset ? data : posts.concat(data);
     hasMore = data.length === PAGE;
@@ -998,7 +1278,12 @@
       ok.disabled = true;
       const row = { cat: sel.value, title, body, nickname: myNick(), tag: myTag };
       if (imgs.length) row.images = imgs.map((x) => x.url);
-      const { data, error } = await sb.from("posts").insert(row).select("id").single();
+      let { data, error } = await sb.from("posts").insert(row).select("id").single();
+      if (error && isMissingCol(error)) {
+        markOld(); delete row.tag; delete row.images;
+        if (row.cat === "인증") row.cat = "자유";
+        ({ data, error } = await sb.from("posts").insert(row).select("id").single());
+      }
       if (error) { ok.disabled = false; err.textContent = "저장하지 못했어요: " + error.message; return; }
       store.set("bitbuy.lastPost", Date.now());
       showDetail(data.id);
@@ -1055,7 +1340,7 @@
     down.onclick = async () => {
       up.disabled = down.disabled = true;
       const { data: n, error: e2 } = await sb.rpc("dislike_post", { pid: id });
-      if (e2) { up.disabled = down.disabled = false; return; }
+      if (e2) { up.disabled = down.disabled = false; down.textContent = "👎 (DB 업데이트 필요)"; return; }
       disliked.push(id); store.set("bitbuy.disliked", disliked.slice(-500));
       down.textContent = "👎 " + n;
     };
@@ -1075,7 +1360,8 @@
       if (needNick()) return;
       const t = ci.value.trim(); if (!t) return;
       cb.disabled = true;
-      const { error: e3 } = await sb.from("comments").insert({ post_id: id, body: t, nickname: myNick(), tag: myTag });
+      let { error: e3 } = await sb.from("comments").insert({ post_id: id, body: t, nickname: myNick(), tag: myTag });
+      if (e3 && isMissingCol(e3)) { markOld(); ({ error: e3 } = await sb.from("comments").insert({ post_id: id, body: t, nickname: myNick() })); }
       cb.disabled = false;
       if (!e3) { ci.value = ""; loadComments(); }
     };
@@ -1108,7 +1394,7 @@
 
   // ---------- 채팅 ----------
   const msgsEl = $("#msgs");
-  const newBtn = $("#newMsgBtn");
+  const newBtn = $("#newMsgBtn") || el("button");
   let chat = [], unseen = 0;
   const atBottom = () => msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 60;
   function renderChat(forceBottom) {
@@ -1176,9 +1462,10 @@
     if (LINK_RE.test(t)) { chatWarn("⚠ 링크는 채팅에 올릴 수 없어요"); return false; }
     lastSend = Date.now(); lastText = t; lastTextAt = Date.now();
     const btn = $("#chatSend"); btn.disabled = true;
-    const { data, error } = await sb.from("chat").insert({ nickname: myNick(), tag: myTag, body: t }).select().single();
+    let { data, error } = await sb.from("chat").insert({ nickname: myNick(), tag: myTag, body: t }).select().single();
+    if (error && isMissingCol(error)) { markOld(); ({ data, error } = await sb.from("chat").insert({ nickname: myNick(), body: t }).select().single()); if (data) data.tag = myTag; }
     btn.disabled = false;
-    if (error) { chatWarn("전송 실패"); return false; }
+    if (error) { chatWarn("전송 실패: " + (error.message || "").slice(0, 40)); console.warn("chat insert", error); return false; }
     addMsg(data); renderChat(true);
     return true;
   }
@@ -1190,8 +1477,51 @@
   };
   // 원클릭 리액션
   const REACTS = ["🚀 가즈아", "💧 돔황챠", "🔥 불장", "🐳 고래 등장", "😭 물렸다", "🙏 존버", "📉 숏 가자", "🎉 익절"];
-  const rbox = $("#reacts");
+  const rbox = $("#reacts") || el("div");
   REACTS.forEach((r) => { const b = el("button", null, r); b.type = "button"; b.onclick = () => sendChat(r); rbox.append(b); });
+
+  // ---------- 오늘의 롱/숏 투표 (한국시간 09시 기준 하루) ----------
+  const voteBox = $("#vote");
+  const voteDay = () => { const d = new Date(Date.now() + 9 * 3600000 - 9 * 3600000); return d.toISOString().slice(0, 10); }; // KST-9h = UTC 날짜
+  let vc = { longs: 0, shorts: 0 }, voteOk = true;
+  const myVote = () => store.get("bitbuy.vote." + voteDay(), null);
+  function renderVote() {
+    if (!voteBox) return;
+    voteBox.textContent = "";
+    const tot = vc.longs + vc.shorts, lp = tot ? vc.longs / tot : 0.5, mine = myVote();
+    const q = el("div", "q");
+    const hh = new Date(Date.now() + 9 * 3600000).getUTCHours();
+    q.append(el("b", null, hh >= 18 || hh < 3 ? "🗳 오늘 밤 미국장, 비트코인은?" : "🗳 오늘 비트코인 방향은?"), el("span", null, tot ? `${tot}명 참여` : "첫 투표를 해 보세요"));
+    const btns = el("div", "btns");
+    [["long", "lg", "📈 떡상 (롱)", lp], ["short", "sh", "📉 떡락 (숏)", 1 - lp]].forEach(([side, c, label, r]) => {
+      const b = el("button", c + (mine === side ? " mine" : ""));
+      const f = el("i", "fill"); f.style.width = (tot ? r * 100 : 0).toFixed(1) + "%";
+      const pctTxt = tot ? (side === "long" ? Math.round(lp * 100) : 100 - Math.round(lp * 100)) + "%" : "";
+      b.append(f, el("span", null, `${label} ${pctTxt}${mine === side ? " ✓" : ""}`));
+      b.disabled = !!mine || !voteOk;
+      b.onclick = () => castVote(side);
+      btns.append(b);
+    });
+    voteBox.append(q, btns);
+  }
+  async function loadVotes() {
+    const { data, error } = await sb.rpc("vote_counts", {});
+    if (error) { voteOk = false; renderVote(); voteBox.title = "update_v6.sql 실행 후 사용할 수 있어요"; return; }
+    const r = Array.isArray(data) ? data[0] : data;
+    vc = { longs: +(r && r.longs) || 0, shorts: +(r && r.shorts) || 0 };
+    voteOk = true; renderVote();
+  }
+  const voteCh = sb.channel("votes-live");
+  voteCh.on("broadcast", { event: "vote" }, () => loadVotes()).subscribe();
+  async function castVote(side) {
+    if (myVote()) return;
+    const { error } = await sb.from("votes").insert({ voter: deviceId, side });
+    if (error && !/duplicate|23505/.test(error.message + error.code)) { voteBox.title = error.message; return; }
+    store.set("bitbuy.vote." + voteDay(), side);
+    await loadVotes();
+    try { voteCh.send({ type: "broadcast", event: "vote", payload: {} }); } catch (_) {}
+  }
+  loadVotes(); setInterval(loadVotes, 30000);
 
   // ---------- 접속자 수 ----------
   const presence = sb.channel("online", { config: { presence: { key: deviceId + Math.random().toString(36).slice(2, 6) } } });

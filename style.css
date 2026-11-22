@@ -84,7 +84,7 @@ header nav a:hover{background:var(--panel2);color:var(--text);text-decoration:no
 .vol input{width:120px;padding:0;accent-color:var(--btc)}
 .vol b{width:28px;color:var(--text);font-size:12px}
 .test-sel{width:auto;padding:5px 9px;font-size:12px;border-radius:999px}
-.alog-wrap{grid-column:2;grid-row:1 / span 5;display:flex;flex-direction:column;gap:6px;min-width:0}
+.alog-wrap{grid-column:2;grid-row:1 / span 8;display:flex;flex-direction:column;gap:6px;min-width:0}
 .alog{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:8px;background:var(--bg);max-height:170px;overflow-y:auto;font-size:12px}
 .alog li{padding:7px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px}
 .alog li:last-child{border-bottom:0}
@@ -198,3 +198,49 @@ footer{max-width:1700px;margin:0 auto;padding:8px 22px 30px;color:var(--dim);fon
 .news .m{display:flex;align-items:center;gap:8px}
 .discuss{margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--mute);border-radius:999px;padding:3px 10px;font-size:11px;white-space:nowrap}
 .discuss:hover{border-color:var(--btc);color:var(--btc)}
+.db-warn{background:rgba(240,80,90,.12);border-bottom:1px solid rgba(240,80,90,.4);color:#ffb3b8;font-size:12px;padding:10px 16px;line-height:1.6}
+
+/* ---- v6: 지표 위젯 ---- */
+.indic-wrap{padding-top:14px;padding-bottom:0}
+.indic{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.card .k{font-size:11px;color:var(--mute);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .k small{color:var(--dim);font-weight:400}
+.card .v{font-size:20px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .s{font-size:11px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gauge-row{display:flex;align-items:center;gap:8px}
+.gauge{width:64px;height:36px;flex:none}
+.lsbar{display:flex;height:10px;border-radius:999px;overflow:hidden;margin:9px 0 6px;background:var(--panel2)}
+.lsbar .l{background:var(--up);width:50%;transition:width .6s}
+.lsbar .r{background:var(--down);flex:1}
+.event-card .v{font-size:14px}
+.event-card.soon{border-color:#f7a600;box-shadow:0 0 0 1px #f7a600 inset}
+.event-card.live{border-color:#f0505a;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{box-shadow:0 0 14px rgba(240,80,90,.5)}}
+.feed{display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 12px;overflow:hidden}
+.feed-label{flex:none;font-size:12px;font-weight:700;color:var(--mute)}
+.feed-items{display:flex;gap:16px;overflow:hidden;white-space:nowrap;font-size:12px;mask-image:linear-gradient(90deg,#000 85%,transparent)}
+.feed-items .it{flex:none;animation:feedIn .35s}
+.feed-items .it.feed-big{font-weight:700;color:#fff}
+.feed-items .it .t{color:var(--dim);margin-right:4px}
+@keyframes feedIn{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:none}}
+/* ---- v6: 롱/숏 투표 ---- */
+.vote{padding:8px 12px;border-bottom:1px solid var(--line);font-size:12px}
+.vote .q{color:var(--mute);margin-bottom:6px;display:flex;justify-content:space-between;gap:6px}
+.vote .q b{color:var(--text)}
+.vote .btns{display:flex;gap:6px}
+.vote .btns button{flex:1;border-radius:8px;padding:7px 6px;font-weight:700;font-size:12px;border:1px solid var(--line);background:var(--panel2);color:var(--text);position:relative;overflow:hidden}
+.vote .btns button .fill{position:absolute;inset:0 auto 0 0;opacity:.22;transition:width .6s}
+.vote .btns button span{position:relative}
+.vote .btns .lg .fill{background:var(--up)} .vote .btns .sh .fill{background:var(--down)}
+.vote .btns button.mine{border-color:var(--btc)}
+.vote .btns button:disabled{cursor:default;opacity:1}
+/* ---- v6: 가격·김프 알림 ---- */
+.pt-input{width:130px;padding:5px 9px;font-size:12px;border-radius:999px}
+.small-in{width:54px}
+.pt-chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:12px}
+.pt-chip button{background:transparent;border:0;color:var(--dim);padding:0 4px}
+.pt-chip button:hover{color:#f0505a}
+@media (max-width:1280px){.indic{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:640px){.indic{grid-template-columns:repeat(2,minmax(0,1fr))}.card .v{font-size:17px}}
+.arow[hidden]{display:none}

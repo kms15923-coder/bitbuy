@@ -25,6 +25,43 @@
 
 <div class="ticker" id="ticker"><span>시세 연결 중…</span></div>
 
+<!-- ===== 핵심 지표 + 경제 일정 + 고래·청산 피드 ===== -->
+<section class="wrap indic-wrap" id="indic">
+  <div class="indic">
+    <div class="card" id="cKimp">
+      <div class="k">김치 프리미엄 <small>BTC</small></div>
+      <div class="v mono" id="iKimp">—</div>
+      <div class="s" id="iKimpSub">업비트 vs 바이비트</div>
+    </div>
+    <div class="card" id="cFx">
+      <div class="k">원/달러 환율</div>
+      <div class="v mono" id="iFx">—</div>
+      <div class="s" id="iFxSub">USDT —</div>
+    </div>
+    <div class="card" id="cFng">
+      <div class="k">공포·탐욕 지수</div>
+      <div class="gauge-row"><svg viewBox="0 0 120 66" class="gauge" id="iFngSvg" aria-hidden="true"></svg><div><div class="v mono" id="iFng">—</div><div class="s" id="iFngSub">—</div></div></div>
+    </div>
+    <div class="card" id="cDom">
+      <div class="k">BTC 도미넌스</div>
+      <div class="v mono" id="iDom">—</div>
+      <div class="s" id="iDomSub">—</div>
+    </div>
+    <div class="card" id="cLs">
+      <div class="k">BTC 롱/숏 비율 <small id="iLsSrc"></small></div>
+      <div class="lsbar"><span class="l" id="iLsL"></span><span class="r" id="iLsR"></span></div>
+      <div class="s"><b class="up" id="iLsLt">롱 —</b> · <b class="down" id="iLsRt">숏 —</b></div>
+    </div>
+    <div class="card event-card" id="cEvent">
+      <div class="k">📅 다음 경제 일정</div>
+      <div class="v" id="iEvName">—</div>
+      <div class="s mono" id="iEvCount">—</div>
+      <div class="s" id="iEvNext"></div>
+    </div>
+  </div>
+  <div class="feed" id="feed"><span class="feed-label">🐋 고래 · 💥 청산</span><div class="feed-items" id="feedItems"><span class="muted">바이비트 실시간 대기 중…</span></div></div>
+</section>
+
 <!-- ===== 상단: 코인 차트 | 나스닥 차트 | 채팅 ===== -->
 <main class="top" id="charts">
   <section class="panel chart-panel" id="cryptoPanel">
@@ -70,6 +107,7 @@
       <input id="nickInput" maxlength="8" placeholder="닉네임 (2~8자)">
       <b class="mono tag" id="nickTag" title="이 브라우저 고유 코드 — 같은 닉네임 사칭 방지"></b>
     </div>
+    <div class="vote" id="vote"></div>
     <div class="msgs-wrap">
       <div class="msgs" id="msgs"><div class="status">채팅 불러오는 중…</div></div>
       <button class="new-msg" id="newMsgBtn" type="button" hidden>↓ 새 메시지</button>
@@ -106,6 +144,29 @@
           <label class="vol">🗣 멘트 <input type="range" id="vvol" min="0" max="100" value="100"><b class="mono" id="vvolNum">100</b></label>
           <button class="chip" id="voiceChip">음성 멘트 켜기</button>
           <select id="voiceSel" class="test-sel" title="멘트 목소리"></select>
+        </div>
+      </div>
+      <div class="arow">
+        <span class="k">가격</span>
+        <div class="chips">
+          <select id="ptSym" class="test-sel"></select>
+          <select id="ptCur" class="test-sel"><option value="krw">₩ 업비트</option><option value="usd">$ 바이비트</option></select>
+          <input id="ptPrice" class="pt-input mono" inputmode="decimal" placeholder="예: 150000000">
+          <button class="chip" id="ptAdd" type="button">+ 목표가 알림</button>
+          <span class="muted small" id="ptNow"></span>
+        </div>
+      </div>
+      <div class="arow" id="ptListRow" hidden>
+        <span class="k"></span>
+        <div class="chips" id="ptList"></div>
+      </div>
+      <div class="arow">
+        <span class="k">김프</span>
+        <div class="chips">
+          <button class="chip" id="kmOn" type="button">김프 알림</button>
+          <label class="vol">위 <input id="kmUp" class="pt-input small-in mono" inputmode="decimal">%</label>
+          <label class="vol">아래 <input id="kmDown" class="pt-input small-in mono" inputmode="decimal">%</label>
+          <label class="vol">10분 급변 <input id="kmJump" class="pt-input small-in mono" inputmode="decimal">%p</label>
         </div>
       </div>
       <div class="arow">
