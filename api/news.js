@@ -1,7 +1,7 @@
 // /api/news — 구글 뉴스에서 '비트코인' 기사를 모아 JSON으로 돌려줍니다.
 // Vercel이 결과를 5분 동안 저장(캐시)하므로 방문자가 많아도 부담이 적어요.
 
-const FEEDS = [
+export const FEEDS = [
   "https://news.google.com/rss/search?q=%EB%B9%84%ED%8A%B8%EC%BD%94%EC%9D%B8+when:2d&hl=ko&gl=KR&ceid=KR:ko",
 ];
 

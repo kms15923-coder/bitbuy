@@ -183,9 +183,11 @@
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       const vs = koVoices();
-      const v = (name && vs.find((x) => x.name === name)) || vs.find((x) => !MALE.test(x.name)) || vs[0];
+      const v = (name && vs.find((x) => x.name === name)) || vs.find((x) => FEMALE.test(x.name)) || vs.find((x) => !MALE.test(x.name)) || null;
       if (v) u.voice = v;
-      u.lang = "ko-KR"; u.volume = 1; u.rate = 1.05; u.pitch = 1.25; // 밝고 젊은 톤
+      const female = v && FEMALE.test(v.name);
+      u.lang = "ko-KR"; u.volume = 1; u.rate = 1.05;
+      u.pitch = female ? 1.25 : 1.6; // 여성 음성이 없으면 목소리를 최대한 높여서 여성 톤으로
       lastVoiceInfo = "기기 음성" + (v ? ": " + v.name : "");
       speechSynthesis.speak(u);
     } catch (_) {}
@@ -202,7 +204,14 @@
       vSrc.playbackRate.value = 1.1; // 살짝 높고 빠르게 → 더 젊은 목소리
       vSrc.connect(out); vSrc.start();
       lastVoiceInfo = "구글 여성 음성 (증폭)";
-    } catch (_) { speakDevice(text); }
+    } catch (_) {
+      try { // 한 번 더 시도
+        ttsCache.delete(text);
+        const buf = await ttsBuffer(text);
+        vSrc = audio.createBufferSource(); vSrc.buffer = buf; vSrc.playbackRate.value = 1.1; vSrc.connect(out); vSrc.start();
+        lastVoiceInfo = "구글 여성 음성 (증폭)";
+      } catch (_) { speakDevice(text); lastVoiceInfo += " — 구글 음성 연결 실패로 대신 재생"; }
+    }
     showVoiceInfo();
   }
   function showVoiceInfo() { const e = document.querySelector("#voiceInfo"); if (e) e.textContent = lastVoiceInfo ? "재생: " + lastVoiceInfo : ""; }
@@ -784,11 +793,16 @@
   let liked = store.get("bitbuy.liked", []);
 
   const tabs = $("#tabs");
+  let hideBot = store.get("bitbuy.hideBot", false);
+  const who = (o) => { const s = el("span", o.is_bot ? "bot-name" : null, o.nickname); if (o.is_bot) s.prepend(el("b", "bot-badge", "BOT")); return s; };
   CATS.forEach((c) => {
     const b = el("button", c === curCat ? "on" : "", c);
-    b.onclick = () => { curCat = c; [...tabs.children].forEach((x) => x.classList.toggle("on", x === b)); showList(true); };
+    b.onclick = () => { curCat = c; [...tabs.children].forEach((x) => { if (!x.classList.contains("bot-toggle")) x.classList.toggle("on", x === b); }); showList(true); };
     tabs.append(b);
   });
+  const botT = el("button", "bot-toggle" + (hideBot ? " on" : ""), hideBot ? "🤖 봇글 숨김" : "🤖 봇글 보기");
+  botT.onclick = () => { hideBot = !hideBot; store.set("bitbuy.hideBot", hideBot); botT.classList.toggle("on", hideBot); botT.textContent = hideBot ? "🤖 봇글 숨김" : "🤖 봇글 보기"; showList(true); };
+  tabs.append(botT);
   $("#writeBtn").onclick = () => showWrite();
 
   const boardView = $("#boardView");
@@ -796,9 +810,10 @@
 
   async function fetchPosts(reset) {
     const from = reset ? 0 : posts.length;
-    let q = sb.from("posts").select("id,cat,title,nickname,likes,created_at,comments(count)")
+    let q = sb.from("posts").select("id,cat,title,nickname,likes,created_at,is_bot,comments(count)")
       .order("created_at", { ascending: false }).range(from, from + PAGE - 1);
     if (curCat !== "전체") q = q.eq("cat", curCat);
+    if (hideBot) q = q.eq("is_bot", false);
     const { data, error } = await q;
     if (error) throw error;
     posts = reset ? data : posts.concat(data);
@@ -817,13 +832,13 @@
     boardView.textContent = "";
     if (!posts.length) { boardMsg("아직 글이 없어요.\n첫 글을 남겨 보세요!"); return; }
     posts.forEach((p) => {
-      const row = el("div", "post");
+      const row = el("div", "post" + (p.is_bot ? " is-bot" : ""));
       row.append(el("span", "cat", p.cat));
       const box = el("div");
       box.append(el("div", "ti", p.title));
       const cnt = (p.comments && p.comments[0] && p.comments[0].count) || 0;
       const mt = el("div", "mt");
-      mt.append(el("span", null, p.nickname), el("span", null, ago(p.created_at)), el("span", null, "♥ " + p.likes), el("span", null, "💬 " + cnt));
+      mt.append(who(p), el("span", null, ago(p.created_at)), el("span", null, "♥ " + p.likes), el("span", null, "💬 " + cnt));
       box.append(mt); row.append(box);
       row.onclick = () => showDetail(p.id);
       boardView.append(row);
@@ -874,7 +889,14 @@
     boardView.textContent = "";
     const d = el("div", "detail");
     const back = el("button", "btn ghost", "← 목록"); back.onclick = () => showList(true);
-    d.append(back, el("h3", null, p.title), el("div", "mt", p.cat + " · " + p.nickname + " · " + ago(p.created_at)), el("div", "body", p.body));
+    const dm = el("div", "mt"); dm.append(el("span", null, p.cat + " · "), who(p), el("span", null, " · " + ago(p.created_at)));
+    const bodyEl = el("div", "body");
+    // 본문의 링크만 눌러서 열 수 있게 (나머지는 그대로 글자로)
+    String(p.body).split(/(https?:\/\/[^\s]+)/g).forEach((part, i) => {
+      if (i % 2) { const a = el("a", null, part.length > 60 ? part.slice(0, 57) + "…" : part); a.href = part; a.target = "_blank"; a.rel = "noopener noreferrer nofollow"; bodyEl.append(a); }
+      else bodyEl.append(document.createTextNode(part));
+    });
+    d.append(back, el("h3", null, p.title), dm, bodyEl);
 
     const acts = el("div", "actions");
     const isLiked = liked.includes(id);
@@ -916,7 +938,9 @@
       if (!cs || !cs.length) { list.append(el("div", "status", "첫 댓글을 남겨 보세요.")); return; }
       cs.forEach((c) => {
         const r = el("div", "cmt");
-        r.append(el("div", "who", c.nickname + " · " + ago(c.created_at)), el("div", "tx", c.body));
+        const w = el("div", "who"); w.append(who(c), el("span", null, " · " + ago(c.created_at)));
+        if (c.is_bot) r.classList.add("is-bot");
+        r.append(w, el("div", "tx", c.body));
         list.append(r);
       });
     }

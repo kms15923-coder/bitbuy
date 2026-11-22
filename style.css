@@ -157,3 +157,9 @@ footer{max-width:1700px;margin:0 auto;padding:8px 22px 30px;color:var(--dim);fon
 }
 
 .online-chip{font-size:11px;font-weight:500;color:#2fbf71;margin-left:6px}
+.bot-badge{display:inline-block;font-size:9px;font-weight:900;letter-spacing:.5px;background:#2b6cb0;color:#fff;border-radius:4px;padding:1px 4px;margin-right:4px;vertical-align:1px}
+.bot-name{color:#7cb7ff}
+.post.is-bot .ti{color:#cfd8e3}
+.cmt.is-bot{background:rgba(43,108,176,.07);border-radius:6px;padding:9px 8px}
+.tabs .bot-toggle{margin-left:auto}
+.tabs .bot-toggle.on{background:#2b6cb0;border-color:#2b6cb0;color:#fff}
